@@ -1,0 +1,36 @@
+# Unit test makefile for AVR controller code
+# Obviously AVR hardware-specific code can not be tested
+# The focus is on I/O and motion planning code
+# hardware_sim.c returns reasonable values for API functions that interact with the hardware
+# Created 10/4/06 by Roy
+
+SIMULATOR_SRC_FILES =controller.c simulator_hal.c kbhit.c autogen_variables.c variables.c ../common/crc.c ../common/numEncoder.c
+SIMULATOR_HEADER_FILES =bittwiddle.h encoder.h kbhit.h autogen_variables.h variables.h
+
+OSTYPE=$(shell uname -s)
+
+ifeq ($(OSTYPE),Linux)
+	OS_PARMS=-Wall
+	SIMULATOR_EXECUTABLE=simulator
+else
+  	OS_PARMS=-DOS_IS_WINDOWS -Wl,--kill-at
+	SIMULATOR_EXECUTABLE=simulator.exe
+endif
+
+all: avrSourceGenerator simulator
+
+avrSourceGenerator:
+	cd ../../java ; bin/runAVRSourceGenerator
+
+OPT = -std=gnu99 
+#-fgnu89-inline
+
+#Input parameters that need to be defined by the user
+ifdef build
+ CFLAGS = -DMC_ROBOT${build} 
+else
+ $(error Must define the robot to compile for)
+endif
+
+simulator: $(SIMULATOR_SRC_FILES) $(SIMULATOR_HEADER_FILES)
+	gcc $(OS_PARMS) $(OPT) $(CFLAGS) -DUNIT_TEST -lpthread -lm -I../lib/common/includes -I../hal $(SIMULATOR_SRC_FILES) -o $(SIMULATOR_EXECUTABLE)

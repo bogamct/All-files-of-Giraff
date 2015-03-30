@@ -1,0 +1,10 @@
+#!/usr/bin/ruby
+
+make17=`make build=3_1_17 2>&1`
+print make17
+`cp controller.upl controller17.upl`
+
+make24=`make build=3_1_24 2>&1`
+print make24
+`cp controller.upl controller24.upl`
+

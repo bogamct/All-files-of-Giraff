@@ -1,0 +1,37 @@
+<html>
+<body>
+<pre>
+<h1>Build Log</h1>
+<h3>
+--------------------Configuration: AVRProject - Win32 Release--------------------
+</h3>
+
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:/code/avr/avrlib -Wa,-ahlms=stxetxtest.lst -mmcu=atmega163 -I. stxetxtest.c -o stxetxtest.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:/code/avr/avrlib -Wa,-ahlms=c:/code/avr/avrlib/buffer.lst -mmcu=atmega163 -I. c:/code/avr/avrlib/buffer.c -o c:/code/avr/avrlib/buffer.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:/code/avr/avrlib -Wa,-ahlms=c:/code/avr/avrlib/uart.lst -mmcu=atmega163 -I. c:/code/avr/avrlib/uart.c -o c:/code/avr/avrlib/uart.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:/code/avr/avrlib -Wa,-ahlms=c:/code/avr/avrlib/lcd.lst -mmcu=atmega163 -I. c:/code/avr/avrlib/lcd.c -o c:/code/avr/avrlib/lcd.o
+c:/code/avr/avrlib/lcd.c: In function `lcdProgressBar':
+c:/code/avr/avrlib/lcd.c:438: warning: comparison between signed and unsigned
+c:/code/avr/avrlib/lcd.c:441: warning: comparison between signed and unsigned
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:/code/avr/avrlib -Wa,-ahlms=c:/code/avr/avrlib/rprintf.lst -mmcu=atmega163 -I. c:/code/avr/avrlib/rprintf.c -o c:/code/avr/avrlib/rprintf.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:/code/avr/avrlib -Wa,-ahlms=c:/code/avr/avrlib/timer.lst -mmcu=atmega163 -I. c:/code/avr/avrlib/timer.c -o c:/code/avr/avrlib/timer.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:/code/avr/avrlib -Wa,-ahlms=c:/code/avr/avrlib/stxetx.lst -mmcu=atmega163 -I. c:/code/avr/avrlib/stxetx.c -o c:/code/avr/avrlib/stxetx.o
+c:/code/avr/avrlib/stxetx.c: In function `stxetxProcess':
+c:/code/avr/avrlib/stxetx.c:126: warning: comparison between signed and unsigned
+c:/code/avr/avrlib/stxetx.c:138: warning: comparison between signed and unsigned
+avr-gcc  c:/code/avr/avrlib/buffer.o c:/code/avr/avrlib/uart.o c:/code/avr/avrlib/lcd.o c:/code/avr/avrlib/rprintf.o c:/code/avr/avrlib/timer.o c:/code/avr/avrlib/stxetx.o stxetxtest.o   -Wl,-Map=stxetxtest.map,--cref -mmcu=atmega163 -o stxetxtest.elf
+avr-objcopy -O ihex  -R .eeprom stxetxtest.elf stxetxtest.hex
+avr-objcopy -j .eeprom --set-section-flags=.eeprom="alloc,load" --change-section-lma .eeprom=0 -O ihex  stxetxtest.elf stxetxtest.eep
+avr-size stxetxtest.elf
+   text    data     bss     dec     hex filename
+  10750       0     234   10984    2ae8 stxetxtest.elf
+Errors: none
+rm c:/code/avr/avrlib/rprintf.o c:/code/avr/avrlib/lcd.o c:/code/avr/avrlib/uart.o c:/code/avr/avrlib/timer.o c:/code/avr/avrlib/stxetx.o c:/code/avr/avrlib/buffer.o
+
+
+
+<h3>Results</h3>
+AVRProject.exe - 0 error(s), 4 warning(s)
+</pre>
+</body>
+</html>

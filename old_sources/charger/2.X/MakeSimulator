@@ -1,0 +1,36 @@
+# Unit test makefile for AVR controller code
+# Obviously AVR hardware-specific code can not be tested
+# The focus is on charger logic but software includes basic battery chemistry simulation
+# Created 1/22/09 by Roy
+
+SIMULATOR_SRC_FILES =bc.c bc_hal.c a2d.c a2d_hal.c ./chemistry/NiMH.c ../../common/crc.c
+SIMULATOR_HEADER_FILES =bc.h bc_hal.h a2d.h a2d_hal.h vartypes.h  ./chemistry/NiMH.h
+EXTRAINCDIRS = -I../../hal -I../../lib/procyon/includes -I../../lib/common/includes
+
+OSTYPE=$(shell uname -s)
+OPT=-std=gnu99 -DSPI_USES_USI_MODULE
+
+ifeq ($(OSTYPE),Linux)
+	OS_PARMS=-Wall -fgnu89-inline
+	SIMULATOR_EXECUTABLE=simulator
+else
+  	OS_PARMS=-DOS_IS_WINDOWS -Wl,--kill-at 
+	SIMULATOR_EXECUTABLE=simulator.exe
+endif
+
+ifdef robot
+ CFLAGS = -DMC_ROBOT${robot}
+else
+ $(error Must define a robot)
+endif
+ 
+ifdef batt_size
+ CFLAGS += -DBATT_SIZE=${batt_size}
+else
+ $(error You must define a batt_size, the battery amp hours.  Currently either 5.0 (powerspace) or 4.4 (shwh power)) 
+endif
+
+all: simulator
+
+simulator: $(SIMULATOR_SRC_FILES) $(SIMULATOR_HEADER_FILES)
+	gcc  $(CFLAGS) $(OS_PARMS) $(OPT) ${EXTRAINCDIRS} -DSIMULATE -lpthread -lm $(SIMULATOR_SRC_FILES) -o $(SIMULATOR_EXECUTABLE)

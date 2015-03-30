@@ -1,0 +1,38 @@
+<html>
+<body>
+<pre>
+<h1>Build Log</h1>
+<h3>
+--------------------Configuration: AVRProject - Win32 Debug--------------------
+</h3>
+
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/buffer.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/buffer.c -o c:\code\avr\avrlib/buffer.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/uart.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/uart.c -o c:\code\avr\avrlib/uart.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/rprintf.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/rprintf.c -o c:\code\avr\avrlib/rprintf.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/timer.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/timer.c -o c:\code\avr\avrlib/timer.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/vt100.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/vt100.c -o c:\code\avr\avrlib/vt100.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/encoder.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/encoder.c -o c:\code\avr\avrlib/encoder.o
+In file included from c:/code/avr/avrlib/encoder.c:29:
+c:/code/avr/avrlib/encoder.h:47:1: warning: multi-line comment
+avr-gcc  c:\code\avr\avrlib/buffer.o c:\code\avr\avrlib/uart.o c:\code\avr\avrlib/rprintf.o c:\code\avr\avrlib/timer.o c:\code\avr\avrlib/vt100.o c:\code\avr\avrlib/encoder.o encodertest.o    -Wl,-Map=encodertest.map,--cref -mmcu=atmega163 -o encodertest.elf
+avr-objcopy --debugging -O coff-ext-avr \
+ --change-section-address   .data-0x800000 \
+ --change-section-address    .bss-0x800000 \
+ --change-section-address .noinit-0x800000 \
+ --change-section-address .eeprom-0x810000 \
+ encodertest.elf encodertest.cof
+avr-objcopy -O ihex  -R .eeprom encodertest.elf encodertest.hex
+avr-objcopy -j .eeprom --set-section-flags=.eeprom="alloc,load" --change-section-lma .eeprom=0 -O ihex  encodertest.elf encodertest.eep
+avr-size encodertest.elf
+   text    data     bss     dec     hex filename
+   4864       0     194    5058    13c2 encodertest.elf
+Errors: none
+rm c:\code\avr\avrlib/uart.o c:\code\avr\avrlib/timer.o c:\code\avr\avrlib/rprintf.o c:\code\avr\avrlib/vt100.o c:\code\avr\avrlib/buffer.o c:\code\avr\avrlib/encoder.o
+
+
+
+<h3>Results</h3>
+AVRProject.exe - 0 error(s), 1 warning(s)
+</pre>
+</body>
+</html>

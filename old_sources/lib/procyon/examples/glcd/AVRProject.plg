@@ -1,0 +1,31 @@
+<html>
+<body>
+<pre>
+<h1>Build Log</h1>
+<h3>
+--------------------Configuration: AVRProject - Win32 Debug--------------------
+</h3>
+
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:/code/avr/avrlib -Wa,-ahlms=c:/code/avr/avrlib/buffer.lst -mmcu=atmega163 -I. c:/code/avr/avrlib/buffer.c -o c:/code/avr/avrlib/buffer.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:/code/avr/avrlib -Wa,-ahlms=c:/code/avr/avrlib/uart.lst -mmcu=atmega163 -I. c:/code/avr/avrlib/uart.c -o c:/code/avr/avrlib/uart.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:/code/avr/avrlib -Wa,-ahlms=c:/code/avr/avrlib/rprintf.lst -mmcu=atmega163 -I. c:/code/avr/avrlib/rprintf.c -o c:/code/avr/avrlib/rprintf.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:/code/avr/avrlib -Wa,-ahlms=c:/code/avr/avrlib/timer.lst -mmcu=atmega163 -I. c:/code/avr/avrlib/timer.c -o c:/code/avr/avrlib/timer.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:/code/avr/avrlib -Wa,-ahlms=c:/code/avr/avrlib/a2d.lst -mmcu=atmega163 -I. c:/code/avr/avrlib/a2d.c -o c:/code/avr/avrlib/a2d.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:/code/avr/avrlib -Wa,-ahlms=c:/code/avr/avrlib/glcd.lst -mmcu=atmega163 -I. c:/code/avr/avrlib/glcd.c -o c:/code/avr/avrlib/glcd.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:/code/avr/avrlib -Wa,-ahlms=c:/code/avr/avrlib/ks0108.lst -mmcu=atmega163 -I. c:/code/avr/avrlib/ks0108.c -o c:/code/avr/avrlib/ks0108.o
+avr-gcc  c:/code/avr/avrlib/buffer.o c:/code/avr/avrlib/uart.o c:/code/avr/avrlib/rprintf.o c:/code/avr/avrlib/timer.o c:/code/avr/avrlib/a2d.o c:/code/avr/avrlib/glcd.o c:/code/avr/avrlib/ks0108.o glcdtest.o   -Wl,-Map=glcdtest.map,--cref -mmcu=atmega163 -o glcdtest.elf
+avr-objcopy -O ihex  -R .eeprom glcdtest.elf glcdtest.hex
+avr-objcopy -j .eeprom --set-section-flags=.eeprom="alloc,load" --change-section-lma .eeprom=0 -O ihex  glcdtest.elf glcdtest.eep
+avr-size glcdtest.elf
+   text    data     bss     dec     hex filename
+   7340     248     191    7779    1e63 glcdtest.elf
+Errors: none
+rm c:/code/avr/avrlib/a2d.o c:/code/avr/avrlib/rprintf.o c:/code/avr/avrlib/uart.o c:/code/avr/avrlib/ks0108.o c:/code/avr/avrlib/timer.o c:/code/avr/avrlib/glcd.o c:/code/avr/avrlib/buffer.o
+
+
+
+<h3>Results</h3>
+AVRProject.exe - 0 error(s), 0 warning(s)
+</pre>
+</body>
+</html>

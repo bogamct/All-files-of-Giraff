@@ -1,0 +1,39 @@
+<html>
+<body>
+<pre>
+<h1>Build Log</h1>
+<h3>
+--------------------Configuration: AVRProject - Win32 Debug--------------------
+</h3>
+
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=ads7828test.lst -mmcu=atmega163 -I. ads7828test.c -o ads7828test.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/buffer.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/buffer.c -o c:\code\avr\avrlib/buffer.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/uart.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/uart.c -o c:\code\avr\avrlib/uart.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/rprintf.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/rprintf.c -o c:\code\avr\avrlib/rprintf.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/timer.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/timer.c -o c:\code\avr\avrlib/timer.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/vt100.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/vt100.c -o c:\code\avr\avrlib/vt100.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/i2c.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/i2c.c -o c:\code\avr\avrlib/i2c.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/ads7828.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/ads7828.c -o c:\code\avr\avrlib/ads7828.o
+avr-gcc  c:\code\avr\avrlib/buffer.o c:\code\avr\avrlib/uart.o c:\code\avr\avrlib/rprintf.o c:\code\avr\avrlib/timer.o c:\code\avr\avrlib/vt100.o c:\code\avr\avrlib/i2c.o c:\code\avr\avrlib/ads7828.o ads7828test.o    -Wl,-Map=ads7828test.map,--cref -mmcu=atmega163 -o ads7828test.elf
+avr-objcopy --debugging -O coff-ext-avr \
+ --change-section-address   .data-0x800000 \
+ --change-section-address    .bss-0x800000 \
+ --change-section-address .noinit-0x800000 \
+ --change-section-address .eeprom-0x810000 \
+ ads7828test.elf ads7828test.cof
+avr-objcopy: ads7828test.elf: no recognized debugging information
+avr-objcopy -O ihex -R .eeprom ads7828test.elf ads7828test.hex
+avr-objcopy -j .eeprom --set-section-flags=.eeprom="alloc,load" --change-section-lma .eeprom=0 -O ihex ads7828test.elf ads7828test.eep
+avr-size ads7828test.elf
+   text    data     bss     dec     hex filename
+   6086       0     254    6340    18c4 ads7828test.elf
+Errors: none
+rm c:\code\avr\avrlib/buffer.o c:\code\avr\avrlib/timer.o c:\code\avr\avrlib/rprintf.o c:\code\avr\avrlib/uart.o c:\code\avr\avrlib/vt100.o c:\code\avr\avrlib/ads7828.o c:\code\avr\avrlib/i2c.o
+
+
+
+<h3>Results</h3>
+AVRProject.exe - 0 error(s), 0 warning(s)
+</pre>
+</body>
+</html>

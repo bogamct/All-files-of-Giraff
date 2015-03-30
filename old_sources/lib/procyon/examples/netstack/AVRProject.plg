@@ -1,0 +1,44 @@
+<html>
+<body>
+<pre>
+<h1>Build Log</h1>
+<h3>
+--------------------Configuration: AVRProject - Win32 Debug--------------------
+</h3>
+
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=netstacktest.lst -mmcu=atmega16 -I. netstacktest.c -o netstacktest.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/buffer.lst -mmcu=atmega16 -I. c:\code\avr\avrlib/buffer.c -o c:\code\avr\avrlib/buffer.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/uart.lst -mmcu=atmega16 -I. c:\code\avr\avrlib/uart.c -o c:\code\avr\avrlib/uart.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/rprintf.lst -mmcu=atmega16 -I. c:\code\avr\avrlib/rprintf.c -o c:\code\avr\avrlib/rprintf.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/timer.lst -mmcu=atmega16 -I. c:\code\avr\avrlib/timer.c -o c:\code\avr\avrlib/timer.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/vt100.lst -mmcu=atmega16 -I. c:\code\avr\avrlib/vt100.c -o c:\code\avr\avrlib/vt100.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/debug.lst -mmcu=atmega16 -I. c:\code\avr\avrlib/debug.c -o c:\code\avr\avrlib/debug.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/net/net.lst -mmcu=atmega16 -I. c:\code\avr\avrlib/net/net.c -o c:\code\avr\avrlib/net/net.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/net/arp.lst -mmcu=atmega16 -I. c:\code\avr\avrlib/net/arp.c -o c:\code\avr\avrlib/net/arp.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/net/ip.lst -mmcu=atmega16 -I. c:\code\avr\avrlib/net/ip.c -o c:\code\avr\avrlib/net/ip.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/net/icmp.lst -mmcu=atmega16 -I. c:\code\avr\avrlib/net/icmp.c -o c:\code\avr\avrlib/net/icmp.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/net/netstack.lst -mmcu=atmega16 -I. c:\code\avr\avrlib/net/netstack.c -o c:\code\avr\avrlib/net/netstack.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/net/rtl8019.lst -mmcu=atmega16 -I. c:\code\avr\avrlib/net/rtl8019.c -o c:\code\avr\avrlib/net/rtl8019.o
+avr-gcc  netstacktest.o c:\code\avr\avrlib/buffer.o c:\code\avr\avrlib/uart.o c:\code\avr\avrlib/rprintf.o c:\code\avr\avrlib/timer.o c:\code\avr\avrlib/vt100.o c:\code\avr\avrlib/debug.o c:\code\avr\avrlib/net/net.o c:\code\avr\avrlib/net/arp.o c:\code\avr\avrlib/net/ip.o c:\code\avr\avrlib/net/icmp.o c:\code\avr\avrlib/net/netstack.o c:\code\avr\avrlib/net/rtl8019.o   -Wl,-Map=netstacktest.map,--cref -mmcu=atmega16 -o netstacktest.elf
+avr-objcopy --debugging -O coff-ext-avr \
+ --change-section-address   .data-0x800000 \
+ --change-section-address    .bss-0x800000 \
+ --change-section-address .noinit-0x800000 \
+ --change-section-address .eeprom-0x810000 \
+ netstacktest.elf netstacktest.cof
+avr-objcopy: netstacktest.elf: no recognized debugging information
+avr-objcopy -O ihex -R .eeprom netstacktest.elf netstacktest.hex
+avr-objcopy -j .eeprom --set-section-flags=.eeprom="alloc,load" --change-section-lma .eeprom=0 -O ihex netstacktest.elf netstacktest.eep
+avr-size netstacktest.elf
+   text    data     bss     dec     hex filename
+  11304       6     888   12198    2fa6 netstacktest.elf
+Errors: none
+rm c:\code\avr\avrlib/buffer.o c:\code\avr\avrlib/timer.o c:\code\avr\avrlib/net/arp.o c:\code\avr\avrlib/net/ip.o c:\code\avr\avrlib/net/rtl8019.o c:\code\avr\avrlib/rprintf.o c:\code\avr\avrlib/net/netstack.o c:\code\avr\avrlib/uart.o c:\code\avr\avrlib/debug.o c:\code\avr\avrlib/net/net.o c:\code\avr\avrlib/vt100.o c:\code\avr\avrlib/net/icmp.o
+
+
+
+<h3>Results</h3>
+AVRProject.exe - 0 error(s), 0 warning(s)
+</pre>
+</body>
+</html>

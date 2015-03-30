@@ -1,0 +1,14 @@
+#!/usr/bin/ruby
+
+minStackSize = 128
+totalRam = 4096
+
+str = `avr-size controller.elf`
+(headerLine,dataLine) = str.split("\n")
+(text,data,bss) = dataLine.split( " " )
+
+ramUsed=data.to_i + bss.to_i
+ramUsedIncludingStack = ramUsed + minStackSize
+if ramUsedIncludingStack > totalRam
+    print "ERROR, total ram used ( including mem reserved for stack ) is ", ramUsedIncludingStack, "\n"
+end

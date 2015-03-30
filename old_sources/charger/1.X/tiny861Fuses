@@ -1,0 +1,23 @@
+# The beginning of this file is fed into avrdude to set the fuses
+
+write efuse 0 0x01
+write lfuse 0 0xe2
+write hfuse 0 0xdc
+quit
+
+efuse
+--
+0x01
+
+lfuse
+--
+0xe2
+
+hfuse
+--
+0xdc
+
+
+CKSEL3..0: 0010
+SUT1..0: 10
+

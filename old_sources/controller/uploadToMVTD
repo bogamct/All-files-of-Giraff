@@ -1,0 +1,2 @@
+#!/bin/bash
+/usr/bin/scp -P $2 controller.upl giraffe@$1:/home/giraffe/telbot/software/avr/controller/

@@ -1,0 +1,158 @@
+#!/usr/bin/python
+import optparse
+import sys
+
+ESCAPE = chr(16)
+buf=""
+
+def escape_internal( c ):
+    return ESCAPE + chr( ord(c)-ord(ESCAPE) )
+    
+def escapeChar( c ):
+    if c in [ESCAPE,chr(17),chr(19)]:
+        return escape_internal( c )
+    else:
+        return c
+
+def escape( s ):
+    newS = ""
+    for c in s:
+        newS += escapeChar( c )
+    return newS
+        
+def intelHexToBin( c ):
+    global buf
+    
+    index = 0
+    colon = c.next()
+    if colon != ':':
+        raise "Expecting colon in first column"
+
+    dataPairs = getByte( c )
+    addressHi = getByte( c )
+    addressLo = getByte( c )
+    dataType = getByte( c )
+    ourCheckSum = dataPairs + addressHi + addressLo + dataType;
+
+    if dataPairs % 2 == 1:
+        raise "Expecting an even number of data bytes"
+    
+    for i in range( dataPairs / 2 ):
+        tempByte1 = getByte( c )
+        tempByte2 = getByte( c )
+        if dataType == 0:
+            # Switch End-ian ordering
+            buf += chr( tempByte2 )
+            buf += chr( tempByte1 )
+        ourCheckSum += tempByte1 + tempByte2
+            
+    checkSum = getByte( c )
+    
+    if (ourCheckSum + checkSum) % 256  != 0:
+        print
+        print ourCheckSum
+        print checkSum
+        raise "Checksums don't match!"
+
+
+def lo8( num ):
+    return num & 0xFF
+
+def hi8( num ):
+    return num >> 8
+    
+def crc_ccitt_update ( crc, data ):
+    data ^= lo8(crc)
+    data = (data ^ ( data << 4)) & 0xff
+    
+    return (((data << 8) | hi8(crc)) ^ (data >> 4) ^ (data << 3)) & 0xffff
+
+def nextCharGenerator( line ):
+    for c in line:
+        yield c
+
+def getWord( num ):
+    if num < 0 or num > 2**16:
+        raise "num out of range"
+    char1 = chr( num >> 8 )
+    char2 = chr( num & 0xff )
+    return char1 + char2
+
+def getWordUpdatingCRC( num, crc ):
+    s = getWord( num );
+    crc[0] = crc_ccitt_update( crc[0], s[0] )
+    crc[0] = crc_ccitt_update( crc[0], s[1] )
+    return s[0] + s[1]
+
+def getByte( c ):
+    nibble1 = int( c.next(), 16 )
+    nibble2 = int( c.next(), 16 )
+    return (nibble1 << 4) | nibble2;
+
+def getCRC( start, length ):
+    crc = 0xffff
+    for i in xrange( start, start+length ):
+        crc = crc_ccitt_update( crc, ord( buf[i] ))
+    return crc
+
+def generateUpload( output, start, length, doEscape ):
+    startWord = getWord( start )
+    lengthWord = getWord( length )
+    
+    crc = 0xffff
+    crc = crc_ccitt_update( crc, ord( startWord[0] ) )
+    crc = crc_ccitt_update( crc, ord( startWord[1] ) )
+    crc = crc_ccitt_update( crc, ord( lengthWord[0] ) )
+    crc = crc_ccitt_update( crc, ord( lengthWord[1] ) )
+    
+    uploadCommand = 'U:' + startWord + lengthWord + getWord( crc ) + buf[:length];
+    if doEscape:
+        uploadCommand = escape( uploadCommand )
+    output.write( uploadCommand )
+
+def generateCheck( output, start, length, crcWord, doEscape ):
+    startWord = getWord( start )
+    lengthWord = getWord( length )
+        
+    checkCommand = 'C:' + startWord + lengthWord + crcWord
+    if doEscape:
+        checkCommand = escape( checkCommand )
+    output.write( checkCommand )
+    
+def generateOutput( input, output, upload, check, length, doEscape ):
+    for line in input:
+        intelHexToBin( nextCharGenerator( line ) )
+
+    start = 0
+    if not length:
+        length = len( buf )
+        
+    if upload:
+        generateUpload( output, start, length, doEscape )
+
+    crcWord = getWord( getCRC( start, length ) )
+    if check:
+        generateCheck( output, start, length, crcWord, doEscape )
+
+parser = optparse.OptionParser(version="%prog 1.0")
+parser.add_option( "-i", "--input", metavar="INPUT", 
+		   help="read Intel hex file from INPUT" )
+parser.add_option( "-o", "--output", metavar="OUTPUT",
+		   help="write output to OUTPUT" )
+parser.add_option( "-l", "--length", metavar="LENGTH", type="int",
+                   help="Process only LENGTH bytes worth of input" )
+parser.add_option( "--no-upload", default=True, dest="upload", action="store_false",
+                   help="Don't include the upload code into the output" )
+parser.add_option( "--no-check", default=True, dest="check", action="store_false",
+                   help="Don't include the CRC check code into the output" )
+parser.add_option( "--no-escape", default=True, dest="escape", action="store_false",
+                   help="Don't escape the XON, XOFF, and escape characters" )
+(options,args) = parser.parse_args()
+input = sys.stdin
+output = sys.stdout
+if options.input:
+	input = open( options.input )
+if options.output:
+	output = open( options.output, "w" )
+        
+generateOutput( input, output, options.upload, options.check, options.length, options.escape )

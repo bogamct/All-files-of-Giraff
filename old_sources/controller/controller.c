@@ -1,0 +1,3336 @@
+/*
+ * Must check that all 16-bit accesses are protected by cli()/sbi() to make sure temporary
+ * 8-bit register isn't overwritten by some other 16-bit access!
+ */
+
+#include <stdbool.h>
+#include <limits.h>
+#include <math.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include "variables.h"
+#include "../common/numEncoder.h"
+#include "../common/robotSpecificSettings.h"
+#include "../charger/2.X/chargerInfo.h"
+
+#ifdef UNIT_TEST
+
+#include "simulator_hal.h"
+#include "../common/crc.h"
+u08 m_unitTestSPI=0;
+
+#else
+
+#include <avr/io.h>
+#include <avr/pgmspace.h>
+#include <avr/interrupt.h>
+#include "../common/serial.h"
+#include <util/delay.h>
+#include "encoder.h"
+#include "../common/commonBootLoader.h"
+#include "../common/commonSPI.h"
+#endif // UNIT_TEST
+
+#include "autogen_variables.h"
+#include "version.h"
+
+#define UART_CMD_BUF_SIZE 64
+#define SPI_CMD_BUF_SIZE 64
+#define BUFFER_SIZE 64
+#define ASCII_CR 13
+
+#define INNER_CONTROL_INTERVAL_MICROS_DEFAULT 1000
+#define OUTER_CONTROL_INTERVAL_MICROS_DEFAULT 6000
+
+// we divide these by four so that they fit in a 16 bit number
+#define LED_TIMER_INTERVAL_DEFAULT_MICROS         2000000/8
+#define WHEELS_GO_LIMP_TIMER_MICROS               6000000/8
+#define TILT_FAILED_TIMER_MICROS                 12000000/8
+
+//// bring telbot to stop if target rpm not set within 10s
+//#define SAFETY_TIMER_INTERVAL 30000
+
+// Used to determine if a motion hardware error has occured
+//Safety timer is in microseconds but is four times slower
+//so if SAFETY_TIMER_INTERVAL = 5 it means that the interval
+//is 20useconds.
+#define SAFETY_TIMER_INTERVAL MICROS_TO_TIMER_TICKS( 25000 ) //Timer set to 0.1seconds
+
+//#define SERVO_DEAD_ZONE_TIMER_INTERVAL 1500
+
+#define CONVERT_TO_METERS .01
+
+#define A2D_NUM_DISTANCE 3
+#define A2D_NUM_SENSORS 2
+
+// DONT CHANGE A2D_NUM_SAMPLES without also changing the median code.
+// it is HARD-CODED to use an efficient algorithm for finding the median
+#define A2D_NUM_SAMPLES 7
+
+//convert MICROS to timer clicks ( 36141 per second )
+#define MICROS_TO_TIMER_TICKS(x) ( (u16) (.036141 * (x)) )
+#define TIMER_TICKS_TO_MICROS(x) ( (u16) ( (x) / .036141 ) )
+#define SPI_TIMER_TICKS ( MICROS_TO_TIMER_TICKS( 1000 ) )
+#define WHEELS_GO_LIMP_TIMER_TICKS ( MICROS_TO_TIMER_TICKS( WHEELS_GO_LIMP_TIMER_MICROS ) )
+
+#define PI 3.141592
+
+// limit to one quarter wheel turn
+#define MAX_SERVO_WINDUP (WHEEL_CLICKS_PER_OUTPUT_REVOLUTION / 4)
+
+#define HEIGHT_DELTA 0.1   // in centimeters
+#define PWM_DELTA 20
+#define HOME_SWITCH_HEIGHT -0.5 // in centimeters
+
+#define MAX_RADIUS 50.0         // in meters
+
+#define TWO_TO_THE_18TH_MINUS_ONE ((2^18)-1)
+#define MAX_TWO_TO_THE_18TH_NUM ((31-18)^2)
+
+#define CLICKS_PER_METER ( WHEEL_CLICKS_PER_OUTPUT_REVOLUTION / (WHEEL_DIAMETER * PI ) )
+#define CLICKS_PER_DEGREE ((CLICKS_PER_METER * PI * WHEELBASE) / 360.0)
+#define ONE_OVER_CLICKS_PER_METER (1.0/CLICKS_PER_METER)
+#define ONE_OVER_CLICKS_PER_DEGREE (1.0/CLICKS_PER_DEGREE)
+
+#define MOTION_QUEUE_DEPTH 5
+
+#define NUM_MOTORS 4
+#define NUM_SORT(a,b) { if ((*a)>(*b)) NUM_SWAP((a),(b)); }
+#define NUM_SWAP(a,b) { u16 temp=(*a);(*a)=(*b);(*b)=temp; }
+#define TO_PWM(x) ((x >= 0) ? (x >> 1) + 127 : ((-(-x >> 1))+127))
+
+typedef void (*CmdFuncPtrType)(void);
+
+struct MotionCommandQueue_ {
+  float pos;
+  float radius;
+  float vgr;
+  float cdp;
+  int mode;
+};
+
+
+typedef struct MotionCommandQueue_ MotionCommandQueue;
+
+// values used in m_mode - lower 4 are writable, upper 4 are read-only
+enum _movementMode {
+  ABSOLUTE_MOVEMENT=1,
+  #ifdef MALAGA_TEMP //Used for Malaga temporary code 
+  RIGID_BODY_MOVEMENT=2,
+  #endif
+  NEXT_MOVE_BUFFERED=4,
+  ESTOP=8,
+  CURRENTLY_MOVING = 128
+} MovementMode;
+
+enum {
+  HOMING_NOT_STARTED=0,
+  HOMING_STARTED=1,
+  HOMING_FAILED=2,
+  HOMING_SUCCEEDED=3
+} TiltHomingState;
+
+char MYPROG ERR_ARG_REQUIRED[]="Error: Argument wasn't optional\r\n";
+char MYPROG ERR_UNKNOWN_ARGUMENT[] = "Error: Unknown argument\r\n";
+char MYPROG ERR_UNKNOWN_NAME[]="Unknown name: ";
+char MYPROG NEW_VALUE[]="New Value: ";
+char MYPROG HELP_MSG[]=( "\r\n"
+			 "Available commands:\r\n"
+			 "boot              - jump to bootloader\r\n"
+			 "home              - run the homing sequence\r\n"
+			 "latency           - latency test\r\n"
+			 "timeloop          - see how many control iterations happen in 1s\r\n"
+			 "debug             - temp. function used for whatever debugging is necessary\r\n"
+                         "a2ds              - see the a2d averages, medians\r\n"
+			 "help              - displays this\r\n"
+			 "get [varname]     - show the value of varname, or list all variables\r\n"
+			 "varsize           - show the size of the different variables\r\n"
+			 "s                 - STOP all motors, set inCtr=0, outCtr=0\r\n"
+			 "uns               - Undo above\r\n"
+			 "set varname value - set the value of varname to the given value\r\n");
+char MYPROG CMDLINE_OK[]  = "OK >\r\n";
+
+char CMD_STOP[] = "s";
+char CMD_UNSTOP[] = "uns";
+char CMD_GET[] = "get";
+char CMD_SET[] = "set";
+
+// Every var except twm is autogenerated by the avrSourceGenerator script 
+// from the Makefile.  But twm is weird special case variable, so we
+// define it here
+char TWM_VAR_N[] = "twm";
+
+char MYPROG CMD_BOOT_P[] = "boot";
+char MYPROG CMD_HOME_P[] = "home";
+char MYPROG CMD_LATENCY_P[] = "latency";
+char MYPROG CMD_CHARGER_P[] = "charger";
+char MYPROG CMD_TIMELOOP_P[] = "timeloop";
+char MYPROG CMD_DEBUG_P[] = "debug";
+char MYPROG CMD_TMP_P[] = "tmp";
+char MYPROG CMD_A2DS_P[]  = "a2ds";
+char MYPROG CMD_HELP_P[] = "help";
+char MYPROG CMD_VARSIZE_P[] = "varsize";
+
+//Moved from autogen variables since this is different between hardware versions
+char TILT_ANGLE_FROM_HOME_VAR_N[] = "tilt_angle_from_home"; char MYPROG TILT_ANGLE_FROM_HOME_VAR_D[] = "tilt angle relative to home position";
+
+s08 m_motionQueueHead=0;
+s08 m_motionQueueTail=0;
+s08 m_itemsInQueue=0;
+MotionCommandQueue MotionQueue[MOTION_QUEUE_DEPTH];
+MotionCommandQueue QueuedInstructions = {0.0f, 0.0f, 0.0f,  0.0f, 0};
+
+//float A2D_LUT[256];
+s16 m_mode = 0; // current movement mode
+s16 m_bufferedMode = 0; // Used to avoid race condition when setting subsequent commands
+u08 m_distanceSensorsEnabled = 0;
+
+//Used for the hardware failure detection
+bool m_maxPowerDetectedFirstTime = false;
+bool m_maxPowerDetectedSecondTime = false;
+bool m_reverseSequenceRunning = false;
+bool m_hw_failure_right_wheel_forward = false;
+bool m_hw_failure_left_wheel_forward = false; 
+#define FAILURE_REVERSE_STRAIGHT_DISTANCE 2.0
+#define FAILURE_REVERSE_TURNING_DISTANCE 200.0
+
+// enable mot0 (1), mot1 (2), mot2 (4), and mot3 (8)
+u08 m_motorEnabled = 1 + 2 + 4 + 8;
+s32 m_lastLeftError = 0;
+s32 m_lastRightError = 0;
+//s32 m_lastServoError = 0;
+
+// counting from here
+s32 m_integral[NUM_MOTORS] = {0,0,0,0}; // stores integral sum for left and right motors
+
+// m_kIntegral stored in units of 1/2^18, so 0.00005 =  13 * (1/2^18), and 0.001 =  262 * (1/2^18)
+//s32 m_kIntegral[NUM_MOTORS] = {30, 30, 2, 30 };  // old - before new servo motor
+s32 m_kIntegral[NUM_MOTORS] = {MOTOR0_KI, MOTOR1_KI, MOTOR2_KI, 30 };
+
+// Used to implement averaging filter for derivative term - reduces high frequency noise
+s32 m_oldDerivativeLeft = 0;
+s32 m_oldDerivativeRight = 0;
+//s32 m_oldDerivativeServo = 0;
+
+
+// m_kPro stored in units of 1/2^18, so 0.01 = 2621 * (1/2^18), and 10 = 2621440 * (1/2^18)
+s32 m_kPro[NUM_MOTORS] = {MOTOR0_KP,MOTOR1_KP, MOTOR2_KP, 3500}; //kpro for tilt used to be 4000
+
+// m_kDer stored in units of 1/2^18
+s32 m_kDer[NUM_MOTORS] = {MOTOR0_KD,MOTOR1_KD, MOTOR2_KD, 8000};
+
+// The goal for the head tilt.
+//Defined as positive angle from the home position in radians
+//The home position is when the homing switch triggers
+float m_servoGoal;
+
+u16   m_wheelTop          = MC_MOTOR0_PWM_MAX;
+float m_servoAcceleration = 0.00015f;
+float m_servoMaxVelocity  = DEFAULT_MAX_SERVO_VELOCITY;
+float m_servoVelocity     = 0.0f;
+
+
+float lastObstacleDist=1.0;
+  
+// These relate to position control mode
+float m_bufferedRadius = 0.0;
+float m_queuedRadius = 0.0;
+float m_radius = 0.0;
+float m_last_radius = 0.0;
+float m_accel = 0.6;  // was 0.3
+float m_vel = 0.6;
+float m_pos = 0.0;
+
+float m_directionCompensatorLeft = 1.0;
+float m_directionCompensatorRight = 1.0;
+
+float m_leftAccel = 0.0;
+float m_leftVel = 0.0;
+float m_leftPos = 0.0;
+float m_currentVelLeft = 0.0;
+float m_currentPosLeft = 0.0;
+float m_leftDecelerationPoint=0;
+float m_leftDirectionCompensator=0;
+
+s16 m_pwmGoal[NUM_MOTORS] = {0,0,0,0};
+s16 m_pwm[NUM_MOTORS] = {0,0,0,0};
+
+float m_rightAccel = 0.0;
+float m_rightVel = 0.0;
+float m_rightPos = 0.0;
+float m_currentVelRight = 0.0;
+float m_currentPosRight = 0.0;
+float m_rightDecelerationPoint=0;
+float m_rightDirectionCompensator=0;
+
+bool  m_newPositionLoaded = false;
+bool  m_rotating = false;
+s32 m_totalLeftCounts=0;
+s32 m_totalRightCounts=0;
+
+float m_lastQueriedLeftCounts = 0;
+float m_lastQueriedRightCounts = 0;
+s32 m_rightCountsWhenLeftCountsLastQueried = 0;
+
+//float m_lastTotalLeftCounts=0.0;
+//float m_lastTotalRightCounts=0.0;
+
+// These are used for clothoid spiral movement
+float m_virtualGearRateOfChange = 0.0;
+float m_bufferedVirtualGearRateOfChange=0.0;
+float m_bufferedClothoidDecelerationPoint = 0.0;
+float m_clothoidDecelerationPoint = 0.0;
+float m_maxVirtualGearRatio = 1.0;
+float m_currentGearRatioDifferential = 0.0;
+float m_lastGearRatioDifferential = 0.0;
+
+s32 m_currentClothoidLeft = 0;
+s32 m_currentClothoidRight = 0;
+float m_currentClothoidLeftFloat=0.0;
+float m_currentClothoidRightFloat=0.0;
+
+// These are used to calculate the additional distance beyond the current move that we have left to travel
+// This is required so that the device does not slow down if a sufficiently long move is buffered
+//bool m_nextMoveDistanceLoaded = true;
+float m_nextMoveDistance = 0.0;
+
+// Tilt mechanism servo
+s32 m_stepwiseServo = 0; // INTERMEDIATE_SERVO_POSITION; // intermediate servo position used to create smooth movement during a move sequenc
+
+// Height axis (vertical stalk) section
+float m_height = 0.0;  // desired vertical stalk height
+float m_stepwise_height = 0.0; // intermediate height used to create smooth movement during a move sequence
+float m_current_height; // current height
+bool m_heightKnown = false;
+bool m_initialHomeSwitchState;
+bool m_initialHomeSwitchStateSet = false;
+float m_heightP = 0.01; // Height axis motor proportional constant
+float m_heightI = 0.0001; // Height axis motor integral constant
+
+// these outer-control interval related vars are initialized in main
+float m_outerControlIntervalSeconds;
+float m_clicksPerMeterTimesOuterControlIntervalSeconds;
+float m_oneOverOuterControlIntervalSeconds;
+u16 m_outerControlIntervalTimerTicks;
+
+u16 m_innerControlIntervalTimerTicks;
+u08 m_innerLoopEnabled=1;
+u08 m_timerPrescaler=0;
+u08 m_tiltHomingState = HOMING_NOT_STARTED;
+bool m_tiltHomingDirection;
+
+u16 m_tempMalaga = 0;
+
+// these timers are auto decremented to zero by an interrupt
+volatile u16 m_ledTimer = 0;
+volatile u16 m_tiltFailedTimer = 0;
+volatile u16 m_spiClickTimer = 0;
+volatile u16 m_innerControlTimer = 0;
+volatile u16 m_outerControlTimer = 0;
+volatile u16 m_safetyTimer = 0;
+volatile u16 m_wheelsGoLimpTimer = 0;
+volatile u16 m_tmpTimer = 0;
+volatile u16 m_button0DebounceTimer = 0;
+volatile u16 m_button1DebounceTimer = 0;
+
+volatile u16 m_a2d[A2D_NUM_SENSORS][A2D_NUM_SAMPLES];
+volatile u08 m_a2dRingIndex = 0;
+volatile u08 m_a2dStep = 0;
+u16 m_a2dTemp[A2D_NUM_SAMPLES];
+
+u16 m_ledTimerIntervalTimerTicks = MICROS_TO_TIMER_TICKS( LED_TIMER_INTERVAL_DEFAULT_MICROS );
+
+bool m_a2dEnable = true;
+
+Setting m_settings[MAX_SETTINGS];
+char m_buf[BUFFER_SIZE];
+char m_uartCmdBuf[UART_CMD_BUF_SIZE];
+u08 m_uartCmdBufIndex=0;
+char m_spiRcvBuf[SPI_CMD_BUF_SIZE];
+char m_spiLine  [SPI_CMD_BUF_SIZE];
+u08 m_spiRcvBufIndex=0;
+u16 m_buck=0;
+
+s16 m_maxIdlePower = 25;
+bool m_spiEnabled = true;
+
+
+// External Inputs
+volatile s16 m_button0=0;
+volatile s16 m_button1=0;
+
+u08 m_oldPinA = 0;
+
+
+volatile s16 m_rotaryDial=0;
+
+// forward declaration
+void doImportantStuff();
+
+//forward declaration
+void doInnerLoopIfItsTime();
+void setOuterControlIntervalMicros( u16 );
+void setInnerControlIntervalMicros( u16 );
+bool getLimitSwitch( int p_index );
+bool getTiltLimitPressed();
+
+void enQueue(float pos, float radius, float vgr, float cdp, int mode)
+{
+#ifdef UNIT_TEST
+  //fprintf(stderr,"Enqueue: pos=%f, vgr=%f, mode=%x, R=%f\n", (double) pos, (double) vgr, mode, (double) radius);
+
+  //printf("Enqueue.\r\n");
+#endif	// UNIT_TEST
+  MotionQueue[m_motionQueueHead].pos = pos;
+  MotionQueue[m_motionQueueHead].radius = radius;
+  MotionQueue[m_motionQueueHead].vgr = vgr;
+  MotionQueue[m_motionQueueHead].cdp = cdp;
+  MotionQueue[m_motionQueueHead].mode = mode;
+  m_motionQueueHead++;
+  m_itemsInQueue++;
+  if (m_motionQueueHead >= MOTION_QUEUE_DEPTH) m_motionQueueHead = 0;
+  if (m_itemsInQueue < 0 || m_itemsInQueue > MOTION_QUEUE_DEPTH) { printf ("ERROR: Queue rollover\n\r"); exit (-1); } // Queue rollover!!!
+}
+
+float fixDirection( float p_val, float p_directionCompensator ) {
+  if ( p_directionCompensator == 1.0 ) {
+    return p_val;
+  } else {
+    return -p_val;
+  }
+}
+
+void deQueue(float *pos, float *radius, float *vgr, float *cdp, int *mode)
+{
+
+  *pos = MotionQueue[m_motionQueueTail].pos;
+  *radius = MotionQueue[m_motionQueueTail].radius;
+  *vgr = MotionQueue[m_motionQueueTail].vgr;
+  *cdp = MotionQueue[m_motionQueueTail].cdp;
+  if ( m_mode != ESTOP ) {
+	//Should not change mode if we are in ESTOP movement state
+	*mode = MotionQueue[m_motionQueueTail].mode;
+  }
+
+#ifdef UNIT_TEST
+  fprintf(stderr,"Dequeue: pos=%f, vgr=%f, cvg=%f, mode=%x, R=%f\n", (double) *pos, (double) *vgr, m_currentGearRatioDifferential, *mode, (double) *radius);
+#endif	// UNIT_TEST
+
+  m_motionQueueTail++;
+  m_itemsInQueue--;
+  if (m_motionQueueTail >= MOTION_QUEUE_DEPTH) m_motionQueueTail = 0;
+  if (m_itemsInQueue < 0 || m_itemsInQueue > MOTION_QUEUE_DEPTH) { printf ("ERROR: Queue rollover\n\r"); exit (-1); } // Queue rollover!!!
+}
+
+void flushQueue()
+{
+  while (m_itemsInQueue)
+    {
+      float pos, radius,vgr,cdp;
+      int mode;
+      deQueue(&pos, &radius,&vgr,&cdp, &mode);
+    }
+}
+
+float calculateDistance (u16 A2DValue) {
+
+  // read raw sensor value
+  float senseData = (float) A2DValue * (5.0/1024);
+  // convert to distance in meters for Sharp GP2Y0A21YK Sensor (80cm max range)
+  // curve of distance w/r/t sensor voltage is approximated by an inverse 4th order polynomial fitted to the data.
+  // formula is of the form:  1 / (a + bx + cx^2 +dx^3 + ex^4), where:
+
+  float a = 0.00355;
+  float b = 0.01388;
+  float c = 0.02892;
+  float d =-0.01171;
+  float e = 0.00191;
+
+  float distance = 0.01 / (a + b*senseData + c*pow(senseData,2) + d*pow(senseData,3) + e*pow(senseData,4)); // in meters
+  return distance;
+}
+
+void populateA2D_LUT () {
+  int i;
+  for (i=0; i<256;i++) {
+    //A2D_LUT[i] = calculateDistance(i << 2);
+  }
+}
+
+
+float min (float val1, float val2) {
+  if (val1 < val2) {
+    return val1;
+  } else {
+    return val2;
+  }
+}
+
+float max (float val1, float val2) {
+  if (val1 > val2) {
+    return val1;
+  } else {
+    return val2;
+  }
+}
+
+u16 getMedianOf7Nums(u16* p) {
+  NUM_SORT(&p[0], &p[5]) ; NUM_SORT(&p[0], &p[3]) ; NUM_SORT(&p[1], &p[6]) ;
+  NUM_SORT(&p[2], &p[4]) ; NUM_SORT(&p[0], &p[1]) ; NUM_SORT(&p[3], &p[5]) ;
+  NUM_SORT(&p[2], &p[6]) ; NUM_SORT(&p[2], &p[3]) ; NUM_SORT(&p[3], &p[6]) ;
+  NUM_SORT(&p[4], &p[5]) ; NUM_SORT(&p[1], &p[4]) ; NUM_SORT(&p[1], &p[3]) ;
+  NUM_SORT(&p[3], &p[4]) ;
+
+  return (p[3]) ;
+}
+
+u16 getMedianA2D( int p_sensor ) {
+  bool oldA2DEnable = m_a2dEnable;
+
+  int i;
+  m_a2dEnable = false;
+  for (i=0; i < A2D_NUM_SAMPLES;i++ ) {
+    m_a2dTemp[i] = m_a2d[ p_sensor ][i];
+  }
+  m_a2dEnable = oldA2DEnable;
+  u16 median = getMedianOf7Nums( m_a2dTemp );
+  return median;
+}
+
+
+u16 getAverageA2D( int p_sensor ) {
+  u32 sum=0;
+  int i;
+
+  bool oldA2DEnable = m_a2dEnable;
+  m_a2dEnable = false;
+  for (i=0; i < A2D_NUM_SAMPLES; i++ ) {
+    sum+= m_a2d[p_sensor][i];
+  }
+  m_a2dEnable = oldA2DEnable;
+
+  return sum / A2D_NUM_SAMPLES;
+}
+
+float getSensorLinearDistance(u08 p_sensorIndex) {
+  if ( !m_distanceSensorsEnabled ) {
+    return 1000.0;
+  }
+
+  u16 reading = getMedianA2D( p_sensorIndex );
+
+  u16 lookupValue = reading >> 2;
+  if (lookupValue > 255) {
+    lookupValue = 255;
+  }
+  //return A2D_LUT[ lookupValue ];
+  return 0;
+}
+
+float getObstacleDist() {
+  float closestSensor = 1000.0;     // absurdly long distance - this will never interfere with a move
+  int i;
+
+  for (i=0; i< A2D_NUM_DISTANCE;i++) {
+    closestSensor = min (closestSensor, getSensorLinearDistance(i));
+  }
+  return closestSensor;
+}
+
+// these variables must be global because they are changed
+// by the constantly running loop which reads chars and updates
+// the speed control vars
+
+void myPutChar( char p_c ) {
+#ifdef UNIT_TEST
+  echo(p_c);
+#else
+  uartPutChar( p_c );
+#endif
+  doImportantStuff();
+}
+
+void print(char *p_str) {
+  while ( *p_str ) {
+    myPutChar( *p_str++ );
+  }
+}
+
+void printNewLine() {
+  print( "\r\n" );
+}
+
+void println(char *p_str) {
+  print( p_str );
+  printNewLine();
+}
+
+#ifndef UNIT_TEST
+void print_P(const char *p_progMemStr) {
+  register char c;
+
+  while ( (c = pgm_read_byte(p_progMemStr++)) )
+    myPutChar(c);
+}
+#else
+void print_P(char *p_str)
+{
+  print (p_str);
+}
+#endif    // UNIT_TEST
+
+void printSpaces( s08 p_num ) {
+  while ( p_num-- > 0 ) myPutChar(' ');
+}
+
+void printRightJustified( char* p_str, u08 p_width ) {
+  print( p_str );
+  printSpaces( p_width - strlen( p_str ) );
+}
+
+void printLeftJustified( char* p_str, u08 p_width ) {
+  printSpaces( p_width - strlen( p_str ) );
+  print( p_str );
+}
+
+void uartPrintByte( u08 p_byte ) {
+  myPutChar ( toHex( p_byte >> 4 ) );
+  myPutChar ( toHex( p_byte & 0xf ) );
+}
+
+void spiPrintByte( u08 p_byte ) {
+  spiPutChar ( toHex( p_byte >> 4 ) );
+  spiPutChar ( toHex( p_byte & 0xf ) );
+}
+
+void printFloat( float p_num ) {
+  u08* ptr = (u08*) &p_num;
+  myPutChar( 'F' );
+  myPutChar( '*' );
+
+  uartPrintByte( ptr[0] );
+  uartPrintByte( ptr[1] );
+  uartPrintByte( ptr[2] );
+  uartPrintByte( ptr[3] );
+
+  //dtostrf( p_num, 9, 6, m_buf );
+  //print( m_buf );
+}
+
+void uartPrintInt( s32 p_num ) {
+  u08* ptr = (u08*) &p_num;
+  myPutChar( 'I' );
+  myPutChar( '*' );
+
+  uartPrintByte( ptr[0] );
+  uartPrintByte( ptr[1] );
+  uartPrintByte( ptr[2] );
+  uartPrintByte( ptr[3] );
+}
+
+s32 limitRange( s32 p_val, s32 p_low, s32 p_high ) {
+  if ( p_val < p_low ) return p_low;
+  if ( p_val > p_high ) return p_high;
+  return p_val;
+}
+
+
+// p_motorIndex:
+//     0 - left wheel
+//     1 - right wheel
+//     2 - tilt
+//     3 - height
+void alterPowerGoal( s32 p_power, u08 p_motorIndex ) {   
+  if ( p_motorIndex == 0 && (m_motorEnabled & 1) == 1 ) {
+    s16 power = (s16) limitRange( p_power, -MC_MOTOR0_PWM_MAX, +MC_MOTOR0_PWM_MAX );
+    m_pwmGoal[p_motorIndex] = power;
+  } else if ( p_motorIndex == 1 && (m_motorEnabled & 2) == 2 ) {
+		s16 power = (s16) limitRange( p_power, -MC_MOTOR1_PWM_MAX, +MC_MOTOR1_PWM_MAX );
+    m_pwmGoal[p_motorIndex] = power;
+  } else if ( p_motorIndex == 2 && (m_motorEnabled & 4) == 4 ) {
+    s16 power = (s16) limitRange( p_power, -MC_MOTOR2_PWM_MAX, +MC_MOTOR2_PWM_MAX );
+    m_pwmGoal[p_motorIndex] = power;
+  } else if ( p_motorIndex == 3 && (m_motorEnabled & 8) == 8 ) {
+    s16 power = (s16) limitRange( p_power, -MC_MOTOR3_PWM_MAX, +MC_MOTOR3_PWM_MAX );
+    m_pwmGoal[p_motorIndex] = power;
+  }
+
+}
+
+// p_motorIndex:
+//     0 - left wheel
+//     1 - right wheel
+//     2 - tilt
+//     3 - height
+void changeMotorSpeedSlowly( u08 p_motorIndex ) {
+#ifndef UNIT_TEST
+  
+  //If the mode is emergency stop then there should be no
+  //way of moving any motor. Therefore this need to be
+  //checked at as low level as possible
+  if ( m_mode & ESTOP ) {
+	MC_MOTOR0_PWM_OCR = 0;
+	MC_MOTOR1_PWM_OCR = 0;
+	MC_MOTOR2_PWM_OCR = 0;
+	MC_MOTOR3_PWM_OCR = 0;
+  } else {
+	  s16 limitedPower = m_pwm[ p_motorIndex ];
+	  s16 pwmGoal = m_pwmGoal [ p_motorIndex ];
+
+	  s16 distanceToMove = pwmGoal - limitedPower;
+
+	  if ( distanceToMove > PWM_DELTA ) {
+		limitedPower += PWM_DELTA;
+	  } else if ( distanceToMove < -PWM_DELTA ) {
+		limitedPower -= PWM_DELTA;
+	  } else {
+		limitedPower = pwmGoal;
+	  }
+	  m_pwm[ p_motorIndex ] = limitedPower;
+
+	  if ( p_motorIndex == 0 ) {
+		if ( (limitedPower < 0) ^ MC_MOTOR0_PHASE_REVERSE ) {
+		  MC_MOTOR0_PHASE_PORT |= _BV( MC_MOTOR0_PHASE_PIN );
+		} else {
+		  MC_MOTOR0_PHASE_PORT &= ~_BV( MC_MOTOR0_PHASE_PIN );
+		}
+		MC_MOTOR0_PWM_OCR = MC_MOTOR0_PWM_FORMULA( limitedPower );
+	  } else if ( p_motorIndex == 1 ) {
+		if ( (limitedPower < 0) ^ MC_MOTOR1_PHASE_REVERSE ) {
+		  MC_MOTOR1_PHASE_PORT |= _BV( MC_MOTOR1_PHASE_PIN );
+		} else {
+		  MC_MOTOR1_PHASE_PORT &= ~_BV( MC_MOTOR1_PHASE_PIN );
+		}
+		MC_MOTOR1_PWM_OCR = MC_MOTOR1_PWM_FORMULA( limitedPower );
+	  } else if ( p_motorIndex == 2 ) {
+		if ( (limitedPower < 0) ^ MC_MOTOR2_PHASE_REVERSE ) {
+		  MC_MOTOR2_PHASE_PORT |= _BV( MC_MOTOR2_PHASE_PIN );
+		} else {
+		  MC_MOTOR2_PHASE_PORT &= ~_BV( MC_MOTOR2_PHASE_PIN );
+		}
+		MC_MOTOR2_PWM_OCR = MC_MOTOR2_PWM_FORMULA( limitedPower );
+	  } else if ( p_motorIndex == 3 ) {
+		if ( (limitedPower < 0) ^ MC_MOTOR3_PHASE_REVERSE ) {
+		  MC_MOTOR3_PHASE_PORT |= _BV( MC_MOTOR3_PHASE_PIN );
+		} else {
+		  MC_MOTOR3_PHASE_PORT &= ~_BV( MC_MOTOR3_PHASE_PIN );
+		}
+		MC_MOTOR3_PWM_OCR = MC_MOTOR3_PWM_FORMULA( limitedPower );
+	  }
+	}
+#endif // UNIT_TEST
+}
+
+s32 getEncoderCountsAndZero( u08 p_motorIndex ) {
+  s32 vel = encoderGetPosition( p_motorIndex );
+  //  if (p_motorIndex == 0) {
+  //     m_lastQueriedLeftCounts -= vel;
+  //  }
+  //  if (p_motorIndex == 1) {
+  //     m_lastQueriedRightCounts -= vel;
+  //  }
+
+  encoderSetPosition( p_motorIndex, 0 );
+  return vel;
+}
+
+// reset servo to zero position
+void flushServoPosition() {
+#ifdef UNIT_TEST
+  flushSimulatedServoPosition();
+#else // UNIT_TEST
+  getEncoderCountsAndZero(2);
+#endif
+}
+
+s32 getServoPosition() {
+#ifdef UNIT_TEST
+  return getSimulatedServoPosition();
+#else
+  return encoderGetPosition(2); //getEncoderCountsAndZero(2);
+#endif // UNIT_TEST
+}
+
+// maximum delay of _delay_ms is 262ms / F_CPU in MHz
+void delayMS(u16 p_ms) {
+  while ( p_ms >= 10 ) {
+    p_ms -= 10;
+    _delay_ms( 10 );
+  }
+}
+
+float distanceToObstacleInClicks() {
+  float obstacleDist =  (getObstacleDist() - 0.32) * (float) CLICKS_PER_METER;
+  if (obstacleDist < 0.0) obstacleDist = 0.0;
+  return obstacleDist;
+}
+
+float calculateMinimumDistanceRequiredToStop(float p_currentVel, float p_accel, float directionCompensator) {
+  //Use Torricelli's equation(V^2(after)=V^2(before)+2*a*d(distance traveled).
+  return (p_currentVel * p_currentVel) / fixDirection( 2 * p_accel, directionCompensator); // recalculate distance left based on maximum deceleration
+}
+
+
+// keep velocity of fastest wheel to a reasonable speed
+float calculateMaxVelocity (float p_vel) {
+  return p_vel / (1 + fabs(m_currentGearRatioDifferential));
+}
+
+// calculate new position for a motor axis based on current accel, velocity, and position
+void calculateNewPos(
+		     float p_accel,
+		     float p_vel,
+		     float p_pos,
+		     float* p_currentPos,
+		     float* p_currentVel,
+		     float directionCompensator,
+		     bool isLeft,
+		     float obstacleDist,
+		     float maxVelocity
+		     ) {
+  // Rules for outer loop:
+  // accelerate unless another rule applies
+  // maximum velocity is bounded by any differential velocity multiplier - this keeps one wheel from spinning too fast in tight turns
+  // go no faster than maximum velocity
+  // if an obstacle is closer than the destination, treat the obstacle as a new destination
+  // go no faster than the speed from which we can decelerate and reach the destination
+  // If this is a clothoid spiral, differential vel increases until a preset differential velocity, then decreases
+  
+  //Input parameter description:
+  //p_accel => Acceleration of the wheel in encoder clicks. Calc with m_accel * m_clicksPerMeterTimesOuterControlIntervalSeconds * (m_outerControlIntervalSeconds)
+  //p_vel => Velocity of the wheel in encoder clicks. Calc with m_vel * m_clicksPerMeterTimesOuterControlIntervalSeconds.
+  //p_pos => Position of the wheel in encoder clicks. Calc with m_pos * CLICKS_PER_METER.
+  //p_currentPos => Current postition in the move in encoder clicks
+  //p_currentVel => 
+  //directionCompensator => 
+  //isLeft => Determines if the position is calculated for the left wheel or not.
+  //obstacleDist => Distance to closest obstacle in unit??. Not in use.
+  //maxVelocity => 
+  
+  float dest = (p_pos - *p_currentPos) + m_nextMoveDistance; // distance we have left to move
+
+  if (!m_rotating && (obstacleDist < dest) && (directionCompensator == 1.0) ) { // only check for obstacles if we are not rotating and moving forward
+    // if an obstacle is closer than the destination, treat the obstacle as a new destination
+    dest = fixDirection( obstacleDist, directionCompensator);
+  }
+
+  float minimumDistanceRequiredToStop = calculateMinimumDistanceRequiredToStop(*p_currentVel,p_accel,directionCompensator);
+
+  // put code that handles reverse direction distance sensors here
+
+  // go no faster than the speed from which we can decelerate and reach the destination
+  // use Torricelli's equation to calculate this
+  // v^2 = Vo^2 + 2ax --> v = sqrt(2ax)
+
+  // if we can't decelerate fast enough, we should overshoot the mark rather than over-accelerate
+  if ( fixDirection(minimumDistanceRequiredToStop,directionCompensator) >= fixDirection(dest,directionCompensator) ) {
+    if (*p_currentVel > 0.0) {
+      *p_currentVel -=  p_accel;  //  decelerate
+    } else if (*p_currentVel < 0.0) {
+      *p_currentVel +=  p_accel;  //  decelerate
+    }
+  } else {     // go no faster than maximum velocity
+    if ( fabs(*p_currentVel) > fabs(maxVelocity)) {
+	  #ifdef MALAGA_TEMP //Used for Malaga temporary code
+	  if (m_mode & RIGID_BODY_MOVEMENT) {
+        if (*p_currentVel > 0.0) {
+		  *p_currentVel -=  p_accel;  //  decelerate
+		} else if (*p_currentVel < 0.0) {
+		  *p_currentVel +=  p_accel;  //  decelerate
+		} //Should not decelarate to fast.
+	  } else {
+	    *p_currentVel = fixDirection( maxVelocity, directionCompensator );
+	  } 
+      #else
+      *p_currentVel = fixDirection( maxVelocity, directionCompensator );
+	  #endif
+    } else {
+      // accelerate if no other rule applies
+      *p_currentVel += fixDirection( p_accel, directionCompensator );
+    }
+  }
+
+  if (fixDirection(*p_currentPos,directionCompensator) >= fixDirection(p_pos,directionCompensator) || obstacleDist == 0.0) {
+    if (m_nextMoveDistance == 0.0 && (fabs(*p_currentVel) < fabs(p_accel))) {
+      *p_currentVel = 0.0;
+      m_currentGearRatioDifferential = 0;
+    }
+
+    if (obstacleDist == 0 && *p_currentVel == 0 && !m_rotating) {
+
+      // an obstacle has reduced our speed to zero
+      m_newPositionLoaded = false;
+      m_nextMoveDistance = 0;
+
+      // flush encoder counts so inner loop doesn't jump
+      getEncoderCountsAndZero(0);
+      getEncoderCountsAndZero(1);
+
+      // zero movement counters for next move
+      m_totalRightCounts =0;
+      m_currentClothoidRight = 0;
+      m_currentClothoidRightFloat = 0.0;
+      m_totalLeftCounts  =0;
+      m_currentClothoidLeft = 0;
+      m_currentClothoidLeftFloat = 0.0;
+
+      m_currentPosLeft = m_leftPos;
+      m_currentPosRight = m_rightPos;
+    }
+    m_mode = m_mode & ~CURRENTLY_MOVING;
+  }
+
+  if (isLeft) {
+    float lengthOfThisStep = (*p_currentVel * (1.0 + m_currentGearRatioDifferential));
+    m_currentClothoidLeftFloat += lengthOfThisStep;
+    m_lastQueriedLeftCounts += lengthOfThisStep;
+    m_currentClothoidLeft = (s32) m_currentClothoidLeftFloat;
+    //printf("%10.2f, %10.2f, %10.3f, ",*p_currentPos / CLICKS_PER_METER, scalingFactor + m_currentGearRatioDifferential, m_currentClothoidLeft / CLICKS_PER_METER);
+  } else {
+    float lengthOfThisStep = (*p_currentVel * (1.0 - m_currentGearRatioDifferential));
+    m_currentClothoidRightFloat += lengthOfThisStep;
+    m_lastQueriedRightCounts += lengthOfThisStep;
+    m_currentClothoidRight = (s32) m_currentClothoidRightFloat;
+    //printf("R:%10.2f, %10.2f\r\n", ((scalingFactor * m_virtualGearRatio) - m_currentGearRatioDifferential), m_currentClothoidRight / CLICKS_PER_METER);
+  }
+  *p_currentPos += *p_currentVel;
+
+  //lastObstacleDist = obstacleDist;
+}
+
+
+// manage movement profiles for positional movement mode (vel, radius, and pos commands)
+void wheelPositionControl() {
+
+  if (m_itemsInQueue) {
+	//Take command from the que and puts it's parameters in the QueuedInstructions array, except if in an E-stop state then the state wont change.
+    deQueue(&QueuedInstructions.pos , &QueuedInstructions.radius, &QueuedInstructions.vgr, &QueuedInstructions.cdp, &QueuedInstructions.mode);
+
+    if (QueuedInstructions.radius > 0) { // don't include next move in calculations if we're currently rotating
+      m_nextMoveDistance = QueuedInstructions.pos  * CLICKS_PER_METER;
+    }
+    m_newPositionLoaded = true;
+  }
+
+  // manage new movement profile
+  if (m_newPositionLoaded && ((!(QueuedInstructions.mode & NEXT_MOVE_BUFFERED)) || !(m_mode & CURRENTLY_MOVING))) {
+
+
+    QueuedInstructions.mode = QueuedInstructions.mode & ~NEXT_MOVE_BUFFERED; // switch back after processing - good for one move only
+    m_mode = QueuedInstructions.mode;
+    m_mode = m_mode | CURRENTLY_MOVING;
+    m_radius = QueuedInstructions.radius;
+    m_pos = QueuedInstructions.pos;
+
+#ifdef UNIT_TEST
+    //fprintf(stderr, "Executing: pos=%f, vgr=%f, mode=%x, R=%f\r\n", (double) m_pos, (double) QueuedInstructions.vgr, m_mode, (double) m_radius);
+#endif	// UNIT_TEST
+
+    if ((m_mode & ABSOLUTE_MOVEMENT) && m_radius == m_last_radius) { // shouldn't be absolute relative to previous move if switching move modes
+      m_mode = m_mode & ~ABSOLUTE_MOVEMENT;
+    } else {
+      // flush encoder counts so inner loop doesn't jump
+      //m_totalLeftCounts +=  getEncoderCountsAndZero(0);
+      //m_totalRightCounts +=  getEncoderCountsAndZero(1);
+      getEncoderCountsAndZero(0);
+      getEncoderCountsAndZero(1);
+
+      // zero movement counters for next move - we are using relative positioning
+      //      if (m_radius == m_last_radius) {
+      //	m_lastTotalLeftCounts = m_lastTotalLeftCounts - (float)m_totalLeftCounts;  // set to negative number
+      //	m_lastTotalRightCounts = m_lastTotalRightCounts - (float)m_totalRightCounts; // set to negative number
+      //      } else {
+      //	m_lastTotalLeftCounts = 0;
+      //	m_lastTotalRightCounts = 0;
+      //      }
+
+
+      m_totalRightCounts = 0;
+      m_currentPosRight = 0;
+      m_currentClothoidRight = 0;
+      m_currentClothoidRightFloat = 0.0;
+
+      m_totalLeftCounts = 0;
+      m_currentPosLeft = 0;
+      m_currentClothoidLeft = 0;
+      m_currentClothoidLeftFloat = 0.0;
+    }
+
+    // position in clicks = m_pos * CLICKS_PER_METER
+    // velocity in clicks/time interval =
+    // m_vel * CLICKS_PER_METER * ( m_outerControlIntervalSeconds )
+    // accel in clicks/time interval^2  =
+    // m_accel * CLICKS_PER_METER * ( m_outerControlIntervalSeconds )^2
+
+    #ifdef MALAGA_TEMP //Used for Malaga temporary code 
+	if (~m_mode & RIGID_BODY_MOVEMENT) {
+	#endif
+		// calculate left and right profiles based on radius
+		if (m_radius > 0.0) {
+		  m_rotating = false;
+		  // move straight ahead - also clothoid moves
+		  m_leftVel = m_rightVel = m_vel * m_clicksPerMeterTimesOuterControlIntervalSeconds;
+		  m_leftAccel = m_rightAccel = m_accel * m_clicksPerMeterTimesOuterControlIntervalSeconds * (m_outerControlIntervalSeconds);
+		  m_leftPos = m_rightPos = m_pos * CLICKS_PER_METER;
+		} else {  //radius == 0.0
+		  // rotate in place
+		  m_rotating = true;
+		  m_rightVel = m_leftVel = m_vel * m_clicksPerMeterTimesOuterControlIntervalSeconds;
+		  m_rightAccel = m_leftAccel = m_accel * m_clicksPerMeterTimesOuterControlIntervalSeconds * (m_outerControlIntervalSeconds);
+		  m_leftPos  =  (m_pos * CLICKS_PER_DEGREE);
+		  m_rightPos = -m_leftPos;
+		}
+	#ifdef MALAGA_TEMP //Used for Malaga temporary code 
+	}  
+	#endif
+
+    m_newPositionLoaded = false;
+    m_nextMoveDistance = 0;
+    m_last_radius = m_radius; // used to compute return values for cang and cdis
+    m_virtualGearRateOfChange = QueuedInstructions.vgr;
+    m_clothoidDecelerationPoint = QueuedInstructions.cdp;
+    m_directionCompensatorLeft = 1.0;
+    m_directionCompensatorRight = 1.0;
+
+    m_lastGearRatioDifferential = m_currentGearRatioDifferential;
+
+    if (m_leftPos < m_currentPosLeft) {
+      m_directionCompensatorLeft = -1.0;
+    }
+
+    if (m_rightPos < m_currentPosRight) {
+      m_directionCompensatorRight = -1.0;
+    }
+	
+	#ifdef MALAGA_TEMP //Used for Malaga temporary code 
+	if (m_mode & RIGID_BODY_MOVEMENT) {
+	  //Calculate the constant velocity 
+	  if (m_pos > 0.0) {
+        m_leftVel = m_rightVel = (m_vel * m_clicksPerMeterTimesOuterControlIntervalSeconds);
+	  } else if (m_pos < 0.0) {
+        m_leftVel = m_rightVel = -(m_vel * m_clicksPerMeterTimesOuterControlIntervalSeconds);
+	  } else {
+	    m_leftVel = m_rightVel = 0.0;
+	  }
+	  
+	  //Calculate angular velocity. 
+	  //Formula for ang. vel.: velocity=radius*angular velocity
+	  //m_maxVirtualGearRatio = Angular velocity, in the rigid body move
+	  float angularVelocityToWheelVelocityInClicks = (((WHEELBASE/2.0) * (m_maxVirtualGearRatio*PI/180.0)) * m_clicksPerMeterTimesOuterControlIntervalSeconds);
+	  
+	  //Add or remove velocity from each wheel
+	  m_leftVel -= angularVelocityToWheelVelocityInClicks;
+      m_rightVel += angularVelocityToWheelVelocityInClicks;
+	  
+	  m_rightAccel = m_leftAccel = m_accel * m_clicksPerMeterTimesOuterControlIntervalSeconds * (m_outerControlIntervalSeconds);
+      
+	  if (m_leftVel > 0.0) {
+	    m_leftPos = CLICKS_PER_METER; //Settting this to number of clicks for around 1m so the distance required to stop is met.
+		m_directionCompensatorLeft = 1.0;
+	  }	else if (m_leftVel < 0.0) {
+	    m_leftPos = -CLICKS_PER_METER;
+		m_directionCompensatorLeft = -1.0;
+	  } else {
+	    m_leftPos = 0.0;
+	  } 
+	  
+	  if (m_rightVel > 0.0) {
+		m_rightPos = CLICKS_PER_METER;
+		m_directionCompensatorRight = 1.0;
+	  }	else if (m_rightVel < 0.0) {
+	    m_rightPos = -CLICKS_PER_METER;
+		m_directionCompensatorRight = -1.0;
+	  } else {
+	    m_rightPos = 0.0;
+	  }
+	  
+	  m_tempMalaga = m_rightVel;
+	  
+	  //Velocity should always be positive
+	  m_leftVel = fabs(m_leftVel);
+	  m_rightVel = fabs(m_rightVel);
+	}  
+	#endif
+  }
+
+  // compensate for clothoid movement if necessary   (only available for straight moves)
+  #ifdef MALAGA_TEMP //Used for Malaga temporary code 
+  if (m_virtualGearRateOfChange != 0 && m_last_radius > MAX_RADIUS && (~m_mode & RIGID_BODY_MOVEMENT)) {
+  #else	
+  if (m_virtualGearRateOfChange != 0 && m_last_radius > MAX_RADIUS) {
+  #endif
+    // decelerate if past deceleration point,
+    // accelerate if less than maximum (minimum) gear ratio,
+    // otherwise coast
+    if (fabs(m_currentPosLeft) > fabs(m_clothoidDecelerationPoint)) {
+      m_currentGearRatioDifferential = m_lastGearRatioDifferential + (m_virtualGearRateOfChange * (m_leftPos - m_currentPosLeft) * ONE_OVER_CLICKS_PER_METER);     // units?
+    } else {
+      m_currentGearRatioDifferential = m_lastGearRatioDifferential + (m_virtualGearRateOfChange * m_currentPosLeft * ONE_OVER_CLICKS_PER_METER);          // units?
+
+      if ((m_maxVirtualGearRatio > 0 && m_currentGearRatioDifferential > m_maxVirtualGearRatio) || (m_maxVirtualGearRatio < 0 && m_currentGearRatioDifferential < m_maxVirtualGearRatio)) {
+		m_currentGearRatioDifferential = m_maxVirtualGearRatio;
+      }
+    }
+    // otherwise coast
+  } else {
+    m_currentGearRatioDifferential = 0;
+  }
+  
+  float obstacleDist = distanceToObstacleInClicks();
+  float maxVelocity = calculateMaxVelocity (m_leftVel);
+
+  #ifdef MALAGA_TEMP //Used for Malaga temporary code 
+  if (m_mode & RIGID_BODY_MOVEMENT) {
+      m_currentPosLeft = 0.0; 
+	  m_currentPosRight = 0.0; //need to set current position to 0 to get continuos movement.
+	  m_currentGearRatioDifferential = 0;
+  }
+  //For rigid body movement use calculated velocity as max velocity(last input parameter)
+  if (m_mode & RIGID_BODY_MOVEMENT) {
+	calculateNewPos(m_leftAccel,m_leftVel,m_leftPos, &m_currentPosLeft, &m_currentVelLeft, m_directionCompensatorLeft,1, obstacleDist, m_leftVel);
+	calculateNewPos(m_rightAccel,m_rightVel,m_rightPos, &m_currentPosRight, &m_currentVelRight, m_directionCompensatorRight,0, obstacleDist, m_rightVel);
+  } else {  
+	calculateNewPos(m_leftAccel,m_leftVel,m_leftPos, &m_currentPosLeft, &m_currentVelLeft, m_directionCompensatorLeft,1, obstacleDist, maxVelocity);
+	calculateNewPos(m_rightAccel,m_rightVel,m_rightPos, &m_currentPosRight, &m_currentVelRight, m_directionCompensatorRight,0, obstacleDist, maxVelocity);
+  }
+  #else
+    calculateNewPos(m_leftAccel,m_leftVel,m_leftPos, &m_currentPosLeft, &m_currentVelLeft, m_directionCompensatorLeft,1, obstacleDist, maxVelocity);
+	calculateNewPos(m_rightAccel,m_rightVel,m_rightPos, &m_currentPosRight, &m_currentVelRight, m_directionCompensatorRight,0, obstacleDist, maxVelocity);
+  #endif
+  
+}
+
+// p_kIntegral will be in units of 1/(2^18) = 0.00000381, with the largest valid value being +/- 32767/(2^18) = 0.125)
+// p_Counts is limited to no larger than +/-8191 which is roughly 1 wheel rotation of travel. ...Thats a lot of integral wind-up...
+// Maximum return value is therefore +/ 8191 * 0.125 = 1024, represented in units of size 1/(2^18)
+// However we are limiting to +/- 1.0 which is 32767*8 = +/- 262135
+s32 integrate( s32 p_Counts, s32 p_motorNumber, s32 p_kIntegral) {
+  p_Counts = limitRange (p_Counts, -8191, +8191);
+  p_kIntegral = limitRange (p_kIntegral, -32767, +32767);
+
+  m_integral[p_motorNumber] = limitRange( m_integral [p_motorNumber] +
+					  p_kIntegral * p_Counts, -262135, 262135 ) ;
+
+  return m_integral[p_motorNumber];
+}
+
+
+bool homeSwitchOn() {
+  return getLimitSwitch(1);
+}
+
+void heightPositionControl() {
+
+  // DO HOMING SEQUENCE IF NECESSARY
+  if (!m_heightKnown) {
+    if (!m_initialHomeSwitchStateSet) {
+      m_initialHomeSwitchState = homeSwitchOn();
+      m_initialHomeSwitchStateSet = true;
+    }
+
+    if (homeSwitchOn()) {
+      // if home switch is active, move down until it is deactivated
+      m_height -= HEIGHT_DELTA;
+    } else {
+      // if home switch is inactive, move up until is is activated
+      m_height += HEIGHT_DELTA;
+    }
+
+    // if current home switch state is different than first home switch state, then we are home
+    if (homeSwitchOn() != m_initialHomeSwitchState) {
+      m_height = HOME_SWITCH_HEIGHT;
+      m_stepwise_height = HOME_SWITCH_HEIGHT;
+      m_heightKnown = true;
+      getEncoderCountsAndZero(3); // flush encoder counts
+      m_current_height = HOME_SWITCH_HEIGHT;
+    }
+  }
+
+  // Lets try doing the path planning and loop closure all at once - hopefully the vertical axis doesn't need fine resolution to work well
+
+  // simple linear, instant-on movement speed should be sufficient given speed of vertical height motor
+  float distanceToMove = m_height - m_stepwise_height;
+  if ( distanceToMove > HEIGHT_DELTA ) {
+    m_stepwise_height += HEIGHT_DELTA;
+  } else if ( distanceToMove < -HEIGHT_DELTA ) {
+    m_stepwise_height -= HEIGHT_DELTA;
+  } else {
+    // needed so m_desiredServoPosition doesn't end up at delta
+    m_stepwise_height = m_height;
+  }
+
+  m_current_height += HEIGHT_CM_PER_ENCODER_COUNT * (float)encoderGetPosition(3);
+
+
+  float difference = m_stepwise_height - m_current_height;
+
+  float error = (m_heightP * difference)  + integrate (difference, 2, m_heightI);
+  alterPowerGoal( (s32) (error*255.0), 2 );
+}
+
+int signum (float num)
+{
+  return (num > 0) - (num < 0);
+}
+
+void servoPositionControl() {
+  // speed is proportional to lesser of:
+  // stepsToTarget * maxSpeedChange
+  //       OR
+  // m_servoVelocity
+
+  //Distance to move in radians, stepwiseServo is in encoder ticks
+  float distanceToMove = m_servoGoal - (((float) (m_stepwiseServo))/ (float) SERVO_TICKS_PER_RADIAN); 
+  float distanceRequiredToStop = (m_servoVelocity * m_servoVelocity)/ (2 * (m_servoAcceleration));
+
+  // needed for moves less than m_servoMaxAccel
+  if (fabs(distanceToMove) < m_servoAcceleration) {
+    m_stepwiseServo = (s32) (m_servoGoal*SERVO_TICKS_PER_RADIAN);
+    m_servoVelocity = 0;
+  } else if ((distanceToMove >= 0.0) && (m_servoVelocity >= 0.0)) {
+    if (distanceToMove > distanceRequiredToStop) {
+      m_servoVelocity += m_servoAcceleration;
+    } else {
+      m_servoVelocity -= m_servoAcceleration;
+    }
+  } else if ((distanceToMove > 0.0) && (m_servoVelocity < 0.0)) {
+    m_servoVelocity += m_servoAcceleration;
+  } else if ((distanceToMove < 0.0) && (m_servoVelocity > 0.0)) {
+    m_servoVelocity -= m_servoAcceleration;
+  } else if ((distanceToMove <= 0.0) && (m_servoVelocity <= 0.0)) {
+    if (-distanceToMove > distanceRequiredToStop) {
+      m_servoVelocity -= m_servoAcceleration;
+    } else {
+      m_servoVelocity += m_servoAcceleration;
+    }
+  }
+
+  // servo not allowed to move faster than +/- m_servoMaxVelocity
+  if (m_servoVelocity > m_servoMaxVelocity) {
+    m_servoVelocity = m_servoMaxVelocity;
+  }
+  if (m_servoVelocity < -m_servoMaxVelocity) {
+    m_servoVelocity = -m_servoMaxVelocity;
+  }
+
+  //Calculate the velocity in clicks for the stepwiseServo
+  m_stepwiseServo += (s32) (m_servoVelocity * SERVO_TICKS_PER_RADIAN);
+}
+
+static inline void timerInterruptEnable() {
+#ifndef UNIT_TEST
+  //enable the output compare match interrupt
+  TIMSK2 = (1<<TOIE2);
+#endif // UNIT_TEST
+}
+
+static inline void timerInterruptDisable() {
+#ifndef UNIT_TEST
+  //disable the output compare match interrupt
+  TIMSK2 = 0;
+#endif // UNIT_TEST
+}
+
+u16 getTimer( volatile u16* p_timer ) {
+  u16 timer;
+  timerInterruptDisable();
+  timer = *p_timer;
+  timerInterruptEnable();
+  return timer;
+}
+
+void setTimer( volatile u16* p_timer, u16 p_resetValue ) {
+  timerInterruptDisable();
+  *p_timer = p_resetValue;
+  timerInterruptEnable();
+}
+
+void outerSpeedControl() {
+#ifdef UNIT_TEST
+  //printf ("Running outerLoop.\n");
+#endif // UNIT_TEST
+
+  wheelPositionControl();
+  servoPositionControl();
+  //heightPositionControl();
+}
+
+
+/*
+bool isButton0On() {
+  return (MC_BUTTON0_PORTIN & _BV( MC_BUTTON0_PIN )) == 0;
+}
+
+bool isButton1On() {
+  return (MC_BUTTON1_PORTIN & _BV( MC_BUTTON1_PIN )) == 0;
+}
+
+void sampleAndDebounceButtons() {
+  bool button0On = isButton0On();
+  bool button1On = isButton1On();
+
+
+  m_oldButton0On = button0On;
+  m_oldButton1On = button1On;
+}
+*/
+
+void innerSpeedControl() {
+#ifdef UNIT_TEST
+  //printf ("Running innerLoop.\n");
+#endif // UNIT_TEST
+
+
+  //--------------Drive motors--------------------
+
+  // we switched the front and back of the MVTD, so we do -= instead of +=
+
+  m_totalRightCounts += getEncoderCountsAndZero(0);
+  m_totalLeftCounts += getEncoderCountsAndZero(1);
+
+  // compensate for gear ratio differences due to clothoid mode, if required
+  s32 adjustedLeftCount = m_currentClothoidLeft - m_totalLeftCounts;
+  s32 adjustedRightCount = m_currentClothoidRight - m_totalRightCounts;
+
+  if (adjustedLeftCount > MAX_SERVO_WINDUP) { m_totalLeftCounts = m_currentClothoidLeft - MAX_SERVO_WINDUP; }
+  if (adjustedLeftCount < -MAX_SERVO_WINDUP) { m_totalLeftCounts = m_currentClothoidLeft + MAX_SERVO_WINDUP; }
+  if (adjustedRightCount > MAX_SERVO_WINDUP) { m_totalRightCounts = m_currentClothoidRight - MAX_SERVO_WINDUP; }
+  if (adjustedRightCount < -MAX_SERVO_WINDUP) { m_totalRightCounts = m_currentClothoidRight + MAX_SERVO_WINDUP; }
+
+  adjustedLeftCount = limitRange(adjustedLeftCount,-MAX_SERVO_WINDUP, +MAX_SERVO_WINDUP);
+  adjustedRightCount = limitRange(adjustedRightCount,-MAX_SERVO_WINDUP, +MAX_SERVO_WINDUP);
+
+#ifdef UNIT_TEST
+  encoder_simulator(0, (s32) adjustedLeftCount);
+  encoder_simulator(1, (s32) adjustedRightCount);
+#endif // UNIT_TEST - this simulates proper encoder feedback
+
+  //PID-regulators for drive motors
+  // Calculations done in fixed point units of 1/2^18
+  s32 leftError  = (m_kPro[0] * adjustedLeftCount)
+    + integrate (adjustedLeftCount, 0, m_kIntegral[0])
+    + ((adjustedLeftCount - m_oldDerivativeLeft)>>1) * m_kDer[0];    // average of last two
+
+  s32 rightError = (m_kPro[1] * adjustedRightCount)
+    + integrate (adjustedRightCount,1, m_kIntegral[1])
+    + ((adjustedRightCount - m_oldDerivativeRight)>>1) * m_kDer[1];  // average of last two
+
+  m_oldDerivativeLeft = m_lastLeftError;
+  m_oldDerivativeRight = m_lastRightError;
+  m_lastLeftError = adjustedLeftCount;
+  m_lastRightError = adjustedRightCount;
+
+
+  // need to convert to power scale, which is 0-255 (8 bits), so shift by (18-8)
+  leftError = leftError >> 10;
+  rightError = rightError >> 10;
+
+
+  // if we're not moving and we've waited for movement to stop, limit the power to the wheels
+  if ( m_mode == 0 ) {
+    if  ( getTimer( &m_wheelsGoLimpTimer ) == 0 ) {
+      rightError = limitRange( rightError, -m_maxIdlePower, m_maxIdlePower );
+      leftError = limitRange( leftError, -m_maxIdlePower, m_maxIdlePower );
+    }
+  } else {
+    setTimer( &m_wheelsGoLimpTimer, WHEELS_GO_LIMP_TIMER_TICKS );
+  }
+
+  alterPowerGoal( rightError, 0 );
+  alterPowerGoal( leftError,  1 );
+
+
+  //------------------------Tilt motor------------------------
+  
+  s32 servoDelta = m_stepwiseServo - getServoPosition();
+  
+  //P-regulator for tilt motor
+  s32 servoError = (m_kPro[2] * servoDelta);
+  
+  // need to convert to power scale, which is 0-255 (8 bits), so shift by (18-8)
+  servoError = servoError >> 10;
+
+#ifdef UNIT_TEST
+  simulateAlteredPowerOfServo(servoError);
+#endif // UNIT_TEST
+  if ( m_tiltHomingState == HOMING_STARTED || m_tiltHomingState == HOMING_SUCCEEDED ) {
+    alterPowerGoal( servoError, 2 );
+  }
+}
+
+Setting* getSettingFromName( char *p_name ) {
+  Setting* setting = NULL;
+  int i;
+
+  for ( i=0;i < MAX_SETTINGS; i++ ) {
+    if ( strcmp( p_name, m_settings[i].m_name ) == 0 ) {
+      setting = &m_settings[i];
+      break;
+    }
+  }
+  return setting;
+}
+
+void printInvalidName( char *p_name ) {
+  print_P( ERR_UNKNOWN_NAME );
+  print( p_name );
+  printNewLine();
+}
+
+void printJustValue( Num* p_num, bool p_isFloat ) {
+  if ( p_isFloat ) {
+    printFloat( p_num-> f );
+  } else {
+    uartPrintInt( p_num->i );
+  }
+}
+
+//fwd
+void undock (float backupDist);
+
+void getOrUpdateNum( const char* p_name, Num* p_num, bool p_get ) {
+  if ( !strcmp( p_name, ENC0_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->i = encoderGetPosition( 0 );
+    } else {
+      encoderSetPosition( 0, p_num->i );
+    }
+  } else if ( !strcmp( p_name, ENC1_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->i = encoderGetPosition( 1 );
+    } else {
+      encoderSetPosition( 1, p_num->i );
+    }
+  } else if ( !strcmp( p_name, ENC2_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->i = encoderGetPosition( 2 );
+    } else {
+      encoderSetPosition( 2, p_num->i );
+    }
+  } else if ( !strcmp( p_name, ENC3_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->i = encoderGetPosition( 3 );
+    } else {
+      encoderSetPosition( 3, p_num->i );
+    }
+  } else if ( !strcmp( p_name, PWM0_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->f = (float) m_pwm[0];
+    } else {
+      alterPowerGoal( (s32)(p_num->f*MC_MOTOR0_PWM_MAX), 0 );
+    }
+  } else if ( !strcmp( p_name, PWM1_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->f = (float)m_pwm[1];
+    } else {
+      alterPowerGoal( (s32)(p_num->f*MC_MOTOR1_PWM_MAX), 1 );
+    }
+  } else if ( !strcmp( p_name, PWM2_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->f = (float)m_pwm[2];
+    } else {
+      alterPowerGoal( (s32)(p_num->f*MC_MOTOR2_PWM_MAX), 2 );
+    }
+  } else if ( !strcmp( p_name, PWM3_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->f = (float)m_pwm[3];
+    } else {
+      alterPowerGoal( (s32)(p_num->f*MC_MOTOR3_PWM_MAX), 3 );
+    }
+  } else if ( !strcmp( p_name, MAX_IDLE_POWER_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->i = m_maxIdlePower;
+    } else {
+      m_maxIdlePower = p_num->i;
+    }
+  } else if ( !strcmp( p_name, LIM0_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->i = getLimitSwitch( 0 );
+    } else {
+      // no sense in setting something that gets continually updated automatically
+    }
+  } else if ( !strcmp( p_name, LIM1_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->i = getLimitSwitch( 1 );
+    } else {
+      // no sense in setting something that gets continually updated automatically
+    }
+  } else if ( !strcmp( p_name, TILT_LIM_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->i = getTiltLimitPressed();
+    } else {
+      // no sense in setting something that gets continually updated automatically
+    }
+  } else if ( !strcmp( p_name, DIS0_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->f = getSensorLinearDistance( 0 );
+    } else {
+      // no sense in setting something that gets continually updated automatically
+    }
+  } else if ( !strcmp( p_name, DIS1_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->f = getSensorLinearDistance( 1 );
+    } else {
+      // no sense in setting something that gets continually updated automatically
+    }
+  } else if ( !strcmp( p_name, DIS2_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->f = getSensorLinearDistance( 2 );
+    } else {
+      // no sense in setting something that gets continually updated automatically
+    }
+  } else if ( !strcmp( p_name, SRV_TOP_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->i = m_wheelTop;
+    } else {
+      m_wheelTop = p_num->i;
+
+#ifndef UNIT_TEST
+      ICR1 = m_wheelTop;
+#endif // UNIT_TEST
+    }
+  } else if ( !strcmp( p_name, TILT_ANGLE_FROM_HOME_VAR_N ) ) {
+      //SERVO_CONVERSION_ANGLE is used to convert the new head totate coordinate system to the old one. This can be removed when we phase out the old Giraffs
+	if ( p_get ) {
+	
+#if defined(MC_ROBOT3_3) || defined(MC_ROBOT3_2) || defined(MC_ROBOT3_1_24) || defined(MC_ROBOT3_1_17) || defined(MC_ROBOT1_1)
+  //Used for giraff 3.3 and older giraffs. This can be removed when we phase out the old Giraffs
+      p_num->f = m_servoGoal;
+    } else {
+      m_servoGoal = p_num->f;
+#else
+  //SERVO_CONVERSION_ANGLE is used to convert the new head totate coordinate system to the old one. 
+      p_num->f = SERVO_CONVERSION_ANGLE-m_servoGoal;
+    } else {
+      m_servoGoal = SERVO_CONVERSION_ANGLE-p_num->f;
+#endif
+
+
+    }
+  } else if ( !strcmp( p_name, TILT_HOMING_STATE_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->i = m_tiltHomingState;
+    } else {
+      // no sense in setting this
+    }
+  } else if ( !strcmp( p_name, SRV_ACC_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->f = m_servoAcceleration;
+    } else {
+      m_servoAcceleration = p_num->f;
+    }
+  } else if ( !strcmp( p_name, SRV_MAX_VEL_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->f = m_servoMaxVelocity;
+    } else {
+      m_servoMaxVelocity = p_num->f;
+    }
+  } else if ( !strcmp( p_name, KP01_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->f = (float) m_kPro[0];
+    } else {
+      m_kPro[0] = (s32) p_num->f;
+      m_kPro[1] = (s32) p_num->f;
+    }
+  } else if ( !strcmp( p_name, KD01_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->f = (float) m_kDer[0];
+    } else {
+      m_kDer[0] = (s32) p_num->f;
+      m_kDer[1] = (s32) p_num->f;
+    }
+  } else if ( !strcmp( p_name, KI01_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->f = (float) m_kIntegral[0];
+    } else {
+      m_kIntegral[0] = (s32) p_num->f;
+      m_kIntegral[1] = (s32) p_num->f;
+    }
+  } else if ( !strcmp( p_name, KP2_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->f = (float) m_kPro[2];
+    } else {
+      m_kPro[2] = (s32) p_num->f;
+    }
+  } else if ( !strcmp( p_name, KI2_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->f = (float) m_kIntegral[2];
+    } else {
+      m_kIntegral[2] = (s32) p_num->f;
+    }
+  } else if ( !strcmp( p_name, KD2_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->f = (float) m_kDer[2];
+    } else {
+      m_kDer[2] = (s32) p_num->f;
+    }
+  } else if ( !strcmp( p_name, INCTR_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->i = TIMER_TICKS_TO_MICROS( m_innerControlIntervalTimerTicks );
+    } else {
+      setInnerControlIntervalMicros( p_num->i );
+    }
+  } else if ( !strcmp( p_name, OUTCTR_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->i = TIMER_TICKS_TO_MICROS( m_outerControlIntervalTimerTicks );
+    } else {
+      setOuterControlIntervalMicros( p_num->i );
+    }
+  } else if ( !strcmp( p_name, DIST_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->i = m_distanceSensorsEnabled;
+    } else {
+      m_distanceSensorsEnabled = p_num->i;
+    }
+  } else if ( !strcmp( p_name, MOT_ENA_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->i = m_motorEnabled;
+    } else {
+      m_motorEnabled = p_num->i;
+    }
+  } else if ( !strcmp( p_name, R_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->f = m_bufferedRadius;
+    } else {
+#ifdef UNIT_TEST
+      //fprintf(stderr,"R = %f\r\n",  p_num->f);
+#endif	// UNIT_TEST
+      m_bufferedRadius = p_num->f;
+    }
+  } else if ( !strcmp( p_name, V_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->f = m_vel;
+    } else {
+      m_vel = p_num->f;
+    }
+  } else if ( !strcmp( p_name, A_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->f = m_accel;
+    } else {
+      m_accel = p_num->f;
+    }
+  } else if ( !strcmp( p_name, P_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->f = m_pos;
+    } else { 
+      if (!m_maxPowerDetectedFirstTime) {
+        m_pos = p_num->f;
+        enQueue(m_pos, m_bufferedRadius, m_bufferedVirtualGearRateOfChange, m_bufferedClothoidDecelerationPoint, m_bufferedMode);
+      }
+    }
+  } else if ( !strcmp( p_name, IMDL_VAR_N ) ) {
+    if (p_get) {
+      // current encoder count minus last value when it was checked (with scaling)
+      p_num->f = (float) m_lastQueriedLeftCounts * ONE_OVER_CLICKS_PER_METER;
+      m_lastQueriedLeftCounts = 0;
+
+      // Grab the current rights counts value so that left and right counts are contemporaneous.
+      m_rightCountsWhenLeftCountsLastQueried = m_lastQueriedRightCounts;
+      m_lastQueriedRightCounts = 0;
+    } else {
+      // SETS NOT ALLOWED
+    }
+  } else if ( !strcmp( p_name, IMDR_VAR_N ) ) {
+    if (p_get) {
+      p_num->f = (float) m_rightCountsWhenLeftCountsLastQueried * ONE_OVER_CLICKS_PER_METER;
+    } else {
+      // SETS NOT ALLOWED
+    }
+  } else if ( !strcmp( p_name, MODE_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->i = m_mode;
+    } else {
+#ifdef UNIT_TEST
+      //fprintf(stderr,"mode = %x\r\n",  p_num->i);
+#endif	// UNIT_TEST
+      m_bufferedMode = ((0xF0) & m_bufferedMode) | (0x0F & p_num->i); // high order bits are read-only
+    }
+  } else if ( !strcmp( p_name, UNDOCK_VAR_N ) ) {
+    if ( p_get ) {
+      // CAN'T GET UNDOCK POSITION - EXECUTE ONLY
+    } else {
+	 undock(p_num->f);
+    }
+  } else if ( !strcmp( p_name, CDIS_VAR_N ) ) {
+    if ( p_get ) {
+      if (m_last_radius == 0.0) {
+	p_num->f = 0;
+      } else {
+	p_num->f = m_currentPosRight * ONE_OVER_CLICKS_PER_METER;
+      }
+    } else {
+      // CAN'T SET CURRENT POSITION - READ ONLY
+    }
+
+  } else if ( !strcmp( p_name, SPI_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->i = m_spiEnabled;
+    } else {
+      m_spiEnabled = p_num->i;
+      if ( m_spiEnabled ) {
+	spiInitMaster();
+      } else {
+	spiDisableMaster();
+      }
+    }
+  } else if ( !strcmp( p_name, BUCK_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->i = m_buck;
+    } else {
+      m_buck = p_num->i;
+      sprintf( m_buf, "%c %d\r", CMD_BUCK , m_buck );
+      spiPutString( m_buf );
+    }
+  } else if ( !strcmp( p_name, CDISL_VAR_N ) ) {
+    if ( p_get ) {
+      if (m_last_radius == 0.0) {
+	p_num->f = 0;
+      } else {
+	p_num->f =  m_currentClothoidLeftFloat * ONE_OVER_CLICKS_PER_METER;
+      }
+    } else {
+      // CAN'T SET CURRENT POSITION - READ ONLY
+    }
+  } else if ( !strcmp( p_name, CANG_VAR_N ) ) {
+    if ( p_get ) {
+      if (m_last_radius == 0.0) {
+	//#ifdef UNIT_TEST
+	//      fprintf(stderr, "cang = %f\r\n",  m_currentPosRight / CLICKS_PER_DEGREE);
+	//#endif	// UNIT_TEST
+	p_num->f = (float) m_currentPosRight * ONE_OVER_CLICKS_PER_DEGREE;
+      } else {
+	//#ifdef UNIT_TEST
+	//      fprintf(stderr, "cang = [WRONG MODE]\r\n");
+	//#endif	// UNIT_TEST
+	p_num->f = 0;
+      }
+    } else {
+      // CAN'T SET CURRENT VELOCITY - READ ONLY
+    }
+  } else if ( !strcmp( p_name, VG_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->f = m_maxVirtualGearRatio;
+    } else {
+      m_maxVirtualGearRatio = p_num->f;
+    }
+  } else if ( !strcmp( p_name, VGR_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->f = m_bufferedVirtualGearRateOfChange;
+    } else {
+#ifdef UNIT_TEST
+      //fprintf(stderr, "vgr = %f\r\n",  (double) p_num->f);
+#endif	// UNIT_TEST
+      m_bufferedVirtualGearRateOfChange = p_num->f;
+    }
+  } else if ( !strcmp( p_name, CVG_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->f = m_currentGearRatioDifferential;
+#ifdef UNIT_TEST
+      //fprintf(stderr, "cvg=%f\r\n", m_currentGearRatioDifferential);
+#endif	// UNIT_TEST
+    } else {
+      // CAN'T SET CURRENT GEAR RATIO - READ ONLY
+    }
+  } else if ( !strcmp( p_name, CDP_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->f = m_bufferedClothoidDecelerationPoint * ONE_OVER_CLICKS_PER_METER;
+    } else {
+#ifdef UNIT_TEST
+      //fprintf(stderr, "cdp = %f\r\n",  p_num->f * CLICKS_PER_METER);
+#endif	// UNIT_TEST
+      m_bufferedClothoidDecelerationPoint = p_num->f * CLICKS_PER_METER;
+    }
+  } else if ( !strcmp( p_name, GVR_VAR_N ) ) {
+    if ( p_get ) {
+      if (m_last_radius == 0.0) {
+	p_num->f = m_currentVelRight * ONE_OVER_CLICKS_PER_DEGREE * m_oneOverOuterControlIntervalSeconds;
+      } else {
+	p_num->f = m_currentVelRight * ONE_OVER_CLICKS_PER_METER * m_oneOverOuterControlIntervalSeconds;
+      }
+    } else {
+      // CAN'T SET CURRENT VELOCITY - READ ONLY
+    }
+  } else if ( !strcmp( p_name, H_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->f = m_current_height;
+    } else {
+      if (m_heightKnown) {   m_height = p_num->f; }  // only accept new height commands if the current height is known (i.e., home sequence has been completed)
+    }
+  } else if ( !strcmp( p_name, TMPS16_VAR_N ) ) {
+#ifndef UNIT_TEST
+    if ( p_get ) {
+      p_num->i = getTimer( &m_wheelsGoLimpTimer );
+    } else {
+      m_totalRightCounts = p_num->i;
+    }
+#endif
+  } else if ( !strcmp( p_name, BUT0_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->i = m_button0;
+    } else {
+      // CAN'T SET BUTTON0 - READ ONLY
+    }
+  } else if ( !strcmp( p_name, BUT1_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->i = m_button1;
+    } else {
+      // CAN'T SET BUTTON1 - READ ONLY
+    }
+  } else if ( !strcmp( p_name, DIAL_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->i = m_rotaryDial;
+    } else {
+      // CAN'T SET ROTARY DIAL - READ ONLY
+    }
+  } else if ( !strcmp( p_name, AVR_LATENCY_VAR_N ) ) {
+    if ( p_get ) {
+      p_num->i = 0;
+    } else {
+      // CAN'T SET LATENCY - READ ONLY
+    }
+  } 
+}
+
+static inline void getNum( const char *p_name, Num* p_num ) {
+  getOrUpdateNum( p_name, p_num, true );
+}
+
+void printVariableNames() {
+  Setting *setting;
+  Num num;
+  int i;
+
+  printNewLine();
+  for ( i=0; i < MAX_SETTINGS; i++ ) {
+    setting = &m_settings[i];
+
+    if ( setting->m_name ) {
+      printRightJustified( setting->m_name, 14 );
+      getNum( setting->m_name, &num );
+      printJustValue( &num, setting->m_isFloat );
+      print( " - " );
+      print_P( (char*) setting->m_description );
+      printNewLine();
+    }
+  }
+  printNewLine();
+}
+
+static inline void setNum( const char* p_name, Num* p_num ) {
+  getOrUpdateNum( p_name, p_num, false );
+}
+
+void putTokenInBuffer( u08 argNum, char* p_buffer ) {
+  char* start=m_uartCmdBuf;
+
+  while ( argNum-- ) {
+    // find the next whitespace character
+    while (*start && *start != ' ') start++;
+
+    // find the first non-whitespace character
+    while (*start && *start == ' ') start++;
+  }
+
+  char* end = start;
+  while (*end && *end != ' ') end++;
+
+  // copy one more byte for the null character
+  u08 len = end-start;
+  memcpy( p_buffer, start, len );
+  p_buffer[ len ]='\0';
+}
+
+void a2dsFunction() {
+
+  bool oldA2DEnable = m_a2dEnable;
+  int i,j;
+  m_a2dEnable = false;
+  for ( i=0; i < A2D_NUM_SENSORS; i++ ) {
+    print( "A2D #" );
+    uartPrintInt( i );
+    print( " = " );
+
+    for ( j=0; j < A2D_NUM_SAMPLES; j++ ) {
+      uartPrintInt( m_a2d[i][j] );
+      print( " " );
+    }
+    print( "avg: " );
+    u16 average = getAverageA2D( i );
+    uartPrintInt( average );
+
+    print( " med: " );
+    u16 median = getMedianA2D( i );
+    uartPrintInt( median );
+
+    printNewLine();
+  }
+  m_a2dEnable = oldA2DEnable;
+
+}
+
+void varSizeFunction() {
+  print( "\ns08: " );
+  uartPrintInt( sizeof( s08 ) );
+
+  print( "\nu08: " );
+  uartPrintInt( sizeof( u08 ) );
+
+  print( "\ns16: " );
+  uartPrintInt( sizeof( s16 ) );
+
+  print( "\nu16: " );
+  uartPrintInt( sizeof( u16 ) );
+
+  print( "\ns32: " );
+  uartPrintInt( sizeof( s32 ) );
+
+  print( "\nu32: " );
+  uartPrintInt( sizeof( u32 ) );
+
+  print( "\nint: " );
+  uartPrintInt( sizeof( int ) );
+
+  print( "\nlong: " );
+  uartPrintInt( sizeof( long ) );
+
+  print( "\nlong long: " );
+  uartPrintInt( sizeof( long long ) );
+
+  printNewLine();
+}
+
+void outputOneVar( char* p_name ) {
+  Setting *setting = getSettingFromName( p_name );
+  Num num;
+
+  if ( setting ) {
+    print( p_name );
+    print( ":" );
+    getNum( setting->m_name, &num );
+    printJustValue( &num, setting->m_isFloat );
+    print( "," );
+  }
+}
+
+void getChargerFunction() {
+#ifdef UNIT_TEST
+  m_unitTestSPI=(m_unitTestSPI+1) % 3;
+  if ( m_unitTestSPI==0 ) {
+    u08 chargeStatus = 0;
+    u08 termination = 0;
+    u08 pwm = 123;
+    u16 time = 379;
+    encodeS16( m_spiLine,  "S:", (chargeStatus << 8) + termination );
+    encodeS16( m_spiLine, ",P:", pwm );
+    encodeS16( m_spiLine, ",T:",  time );
+  } else if ( m_unitTestSPI == 1 ) {
+    encodeFloat( m_spiLine, "B:", 24.56789f );
+    encodeFloat( m_spiLine, ",b:", 1.234567f );
+    encodeFloat( m_spiLine, ",t:", 27.89012f );
+  } else {
+    encodeFloat( m_spiLine, "D:", 32.34567 );
+    encodeFloat( m_spiLine, ",d:", 2.345678 );
+    encodeFloat( m_spiLine, ",W:", 238.1234567 );
+  }
+  addCRCAndCR( m_spiLine );
+#endif
+
+  print( m_spiLine );
+  m_spiLine[0]=0;
+
+#ifndef UNIT_TEST
+  printNewLine();
+#endif
+}
+
+void getBulkDataFunction() {
+  outputOneVar( "cang" );
+  outputOneVar( "cdis" );
+  outputOneVar( "gvr" );
+  outputOneVar( "tilt_angle_from_home" );
+  //  m_a2dEnable = false;
+  //  outputOneVar( "dis0" );
+  //  outputOneVar( "dis1" );
+  //  outputOneVar( "dis2" );
+  //  m_a2dEnable = true;
+  outputOneVar( "imdl" );
+  outputOneVar( "imdr" );
+  outputOneVar( "cvg" );
+  outputOneVar( "mode" );
+  printNewLine();
+}
+
+void getButtonDataFunction() {
+  outputOneVar( "but0" );
+  outputOneVar( "but1" );
+  outputOneVar( "dial" );
+  printNewLine();
+}
+
+void setVariable( Setting* p_setting, char* p_value ); // fwd
+void changeSetting( Setting* p_setting, Num p_newVal ); // fwd
+
+// Process entire turn-while-moving command in one go for higher efficiency
+// The java serial port library has high latency, so doing everything in one shot speeds things up.
+void turnWhileMovingFunction() {
+  // What is normally sent individually: vg, cdp, vgr, r, v, mode, p, mode, vgr, p
+  // However, the r, both modes, and the final vgr are invarient, so we only need to send:
+  //  vg, cdp, vgr, v, p, p
+  //
+  // These 6 parameters are sent as a space delimited list. Example:
+  //
+  // twm 0.34 0.43 0.22 0.1 0.2 0.3
+
+  Num num;
+
+  putTokenInBuffer( 2, m_buf );
+  num.f = atof( m_buf );
+  changeSetting( getSettingFromName("vg"), num);
+
+#ifdef UNIT_TEST
+  //  fprintf(stderr,"vg = %f, ",  num.f);
+#endif
+
+  putTokenInBuffer( 3, m_buf );
+  num.f = atof( m_buf );
+  changeSetting( getSettingFromName("cdp"), num);
+
+#ifdef UNIT_TEST
+  //  fprintf(stderr,"cdp = %f, ",  num.f);
+#endif
+
+  putTokenInBuffer( 4, m_buf );
+  num.f = atof( m_buf );
+  changeSetting( getSettingFromName("vgr"), num);
+
+#ifdef UNIT_TEST
+  //  fprintf(stderr,"vgr = %f, ",  num.f);
+#endif
+
+  num.f = 666.0;
+  changeSetting( getSettingFromName("r"), num);
+
+#ifdef UNIT_TEST
+  //  fprintf(stderr,"r = %i, ",  num.i);
+#endif
+
+  putTokenInBuffer( 5, m_buf );
+  num.f = atof( m_buf );
+  changeSetting( getSettingFromName("v"), num);
+
+#ifdef UNIT_TEST
+  //  fprintf(stderr,"v = %f, ",  num.f);
+#endif
+
+  num.i = 0;
+  changeSetting( getSettingFromName("mode"), num);
+
+#ifdef UNIT_TEST
+  //  fprintf(stderr,"m = %i, ",  num.i);
+#endif
+
+  putTokenInBuffer( 6, m_buf );
+  num.f = atof( m_buf );
+  changeSetting( getSettingFromName("p"), num);
+
+#ifdef UNIT_TEST
+  //  fprintf(stderr,"p = %f, ",  num.f);
+#endif
+
+  num.i = 4;
+  changeSetting( getSettingFromName("mode"), num);
+
+#ifdef UNIT_TEST
+  //  fprintf(stderr,"m = %i, ",  num.i);
+#endif
+
+  num.f = 0.0;
+  changeSetting( getSettingFromName("vgr"), num);
+
+#ifdef UNIT_TEST
+  //  fprintf(stderr,"vgr = %f, ",  num.f);
+#endif
+
+  putTokenInBuffer( 7, m_buf );
+  setVariable( getSettingFromName("p"), m_buf );  // use set variable so we echo back last value
+
+#ifdef UNIT_TEST
+  //  fprintf(stderr,"p = %f\r\n",  num.f);
+#endif
+}
+
+
+void getFunction() {
+  Setting *setting;
+  Num num;
+
+  putTokenInBuffer( 1, m_buf );
+  m_a2dEnable = false;
+  if ( strlen( m_buf ) ) {
+    if ( strcmp( m_buf, BULK_DATA_VAR_N ) == 0 ) {
+      getBulkDataFunction();
+    } else if ( strcmp( m_buf, BUTTON_DATA_VAR_N ) == 0 ) {
+      getButtonDataFunction();
+    } else if ( strcmp( m_buf, CHARGER_DATA_VAR_N ) == 0 ) {
+      getChargerFunction();
+    } else {
+      setting = getSettingFromName( m_buf );
+      if ( setting ) {
+			getNum( setting->m_name, &num );
+			printJustValue( &num, setting->m_isFloat );
+			printNewLine();
+      } else {
+		printInvalidName( m_buf );
+      }
+    }
+  } else {
+    printVariableNames();
+  }
+  m_a2dEnable = true;
+}
+
+void changeSetting( Setting* p_setting, Num p_newVal ) {
+  Num newVal = p_newVal;
+
+  if ( p_setting->m_isFloat ) {
+    if ( p_newVal.f < p_setting->m_min.f ) {
+      newVal = p_setting->m_min;
+    } else if ( p_newVal.f > p_setting->m_max.f ) {
+      newVal = p_setting->m_max;
+    }
+  } else {
+    if ( p_newVal.i < p_setting->m_min.i ) {
+      newVal = p_setting->m_min;
+    } else if ( p_newVal.i > p_setting->m_max.i ) {
+      newVal = p_setting->m_max;
+    }
+  }
+
+  // set num
+  setNum( p_setting->m_name, &newVal );
+}
+
+void setVariable( Setting* p_setting, char* p_value ) {
+  Num num;
+
+  if ( p_setting->m_isFloat ) {
+    num.f = atof( p_value );
+  } else {
+    sscanf( p_value, "%li", &num.i );
+  }
+
+  changeSetting( p_setting, num );
+  getNum( p_setting->m_name, &num );
+  printJustValue( &num, p_setting->m_isFloat );
+  printNewLine();
+}
+
+void setFunction() {
+  Setting *setting;
+
+  putTokenInBuffer( 1, m_buf );
+
+  if ( strlen( m_buf ) ) {
+    if ( strcmp( m_buf, TWM_VAR_N ) == 0 ) {
+      turnWhileMovingFunction();
+    } else {
+      setting = getSettingFromName( m_buf );
+      if ( setting ) {
+        putTokenInBuffer( 2, m_buf );
+        if ( strlen( m_buf ) ) {
+	  setVariable( setting, m_buf );
+	} else {
+	  print_P( ERR_ARG_REQUIRED );
+        }
+      } else {
+        printInvalidName( m_buf );
+      }
+    }
+  } else {
+    printVariableNames();
+  }
+}
+
+void stopFunction() {
+  int motor;
+  m_innerLoopEnabled = 0;
+  m_outerControlIntervalTimerTicks = 0;
+  for ( motor=0; motor < NUM_MOTORS; motor++ ) {
+    alterPowerGoal( 0, motor );
+  }
+}
+
+void setOuterControlIntervalMicros( u16 p_micros ) {
+  m_outerControlIntervalTimerTicks = MICROS_TO_TIMER_TICKS( p_micros );
+  m_outerControlIntervalSeconds = (float) p_micros / 1000000;
+  m_clicksPerMeterTimesOuterControlIntervalSeconds = CLICKS_PER_METER * m_outerControlIntervalSeconds;
+  m_oneOverOuterControlIntervalSeconds = 1 / m_outerControlIntervalSeconds;
+}
+
+void setInnerControlIntervalMicros( u16 p_micros ) {
+  m_innerControlIntervalTimerTicks = MICROS_TO_TIMER_TICKS( p_micros );
+}
+
+void unstopFunction() {
+  m_innerLoopEnabled = 1;
+  m_outerControlIntervalTimerTicks = MICROS_TO_TIMER_TICKS( OUTER_CONTROL_INTERVAL_MICROS_DEFAULT );
+}
+
+
+#if defined(UNIT_TEST)
+bool getTiltLimitPressed() {
+  return getSimulatedServoHomeSwitchState();
+}
+#endif
+
+#if !defined(MC_ROBOT0)
+bool getLimitSwitch( int p_index ) {
+  bool value = false;
+
+#ifdef NEED_TO_FIX_THESE_PIN_NAMES
+  if ( p_index == 0 ) {
+    value = (PINB & _BV( PB0 )) == 0; imConfirmingThisIsInactive();
+  } else {
+    value = (PINB & _BV( PB1 )) == 0; imConfirmingThisIsInactive();
+  }
+#endif
+  return value;
+}
+#endif
+
+
+#if defined(MC_ROBOT0)
+bool getLimitSwitch( int p_index ) {
+  return 0;
+}
+
+bool getTiltLimitPressed() {
+  return 0;ConfigThisOff();
+}
+#endif
+
+#if !defined(UNIT_TEST)
+bool getTiltLimitPressed() {
+  return (TILT_LIMIT_PORTIN & _BV( TILT_LIMIT_PIN )) == 0;
+}
+#endif
+
+void tiltHomingInitialize() {
+  flushServoPosition();
+  m_stepwiseServo = 0;
+  m_servoMaxVelocity  = SERVO_HOMING_VELOCITY;
+  m_tiltHomingDirection = getTiltLimitPressed();
+
+  // assume move in negative direction [if button isn't pressed]
+  m_servoGoal = -50.0;     // some number larger than largest possible travel
+  if ( m_tiltHomingDirection ) {
+    // move in positive direction if switch is enabled
+    m_servoGoal = 50.0;      // some number larger than largest possible travel
+  }
+  m_tiltFailedTimer = MICROS_TO_TIMER_TICKS( TILT_FAILED_TIMER_MICROS );
+  m_tiltHomingState = HOMING_STARTED;
+}
+
+void tiltHomingFailed() {
+  m_tiltHomingState = HOMING_FAILED;
+
+  // reduce power to tilt motor to zero
+  alterPowerGoal( 0, 2 );
+}
+
+void tiltHomingFinished() {
+#ifdef UNIT_TEST
+  fprintf(stderr,"Just passed home:%f\n", m_servoGoal);
+#endif // UNIT_TEST
+
+  float currentLocation = 0;
+  encoderSetPosition( 2, currentLocation );
+  m_stepwiseServo = currentLocation;
+
+#if defined(MC_ROBOT3_3) || defined(MC_ROBOT3_2) || defined(MC_ROBOT3_1_24) || defined(MC_ROBOT3_1_17) || defined(MC_ROBOT1_1)
+  //Used for giraff 3.3 and older giraffs. This can be removed when we phase out the old Giraffs
+  m_servoGoal = TILT_ANGLE_FROM_HOME_VAR_DEFAULT;
+#else
+  //SERVO_CONVERSION_ANGLE is used to convert the new head totate coordinate system to the old one. 
+  m_servoGoal = SERVO_CONVERSION_ANGLE-TILT_ANGLE_FROM_HOME_VAR_DEFAULT;
+#endif
+  m_servoMaxVelocity = DEFAULT_MAX_SERVO_VELOCITY;
+  m_tiltHomingState = HOMING_SUCCEEDED;
+}
+
+// Move the servo to the home position.
+void tiltHoming() {
+  bool tiltLimitPressed = getTiltLimitPressed();
+  if ( tiltLimitPressed == m_tiltHomingDirection ) {
+#ifdef UNIT_TEST
+//    fprintf(stderr, "Homing direction: %d. Waiting for switch to go opposite. Location=%ld, Vel=%f\n", m_tiltHomingDirection, getServoPosition(), m_servoVelocity);
+#endif // UNIT_TEST
+  } else {
+    tiltHomingFinished();
+  }
+}
+
+void tiltMotorInit() {
+#ifndef UNIT_TEST
+
+  // make the pwm pin an output pin
+  MC_MOTOR2_PWM_DDR |= _BV( MC_MOTOR2_PWM_PIN );
+
+  // no power to servo
+  MC_MOTOR2_PWM_OCR  = 0;
+
+  MC_MOTOR2_PHASE_DDR |= _BV( MC_MOTOR2_PHASE_PIN );
+
+#ifdef MC_SLEEP
+  MC_MOTOR2_SLEEP_DDR |= _BV( MC_MOTOR2_SLEEP_PIN );
+
+  MC_MOTOR2_SLEEP_PORT |= _BV( MC_MOTOR2_SLEEP_PIN );
+#endif
+
+  TCCR2A |= (1<<COM2A1) |               // clear on compare match when upcounting
+    (1<<WGM20);
+  TCCR2B |= (1<<CS20);
+  TCNT2 = 0;
+#endif // UNIT_TEST
+}
+
+
+void heightMotorInit() {
+#ifndef UNIT_TEST
+
+  // make the pwm pin an output pin
+  MC_MOTOR3_PWM_DDR |= _BV( MC_MOTOR3_PWM_PIN );
+
+  // no power to servo
+  MC_MOTOR3_PWM_OCR  = 0;
+
+  MC_MOTOR3_PHASE_DDR |= _BV( MC_MOTOR3_PHASE_PIN );
+
+  TCCR2A |= (1<<COM2B1) |               // clear on compare match when upcounting
+    (1<<WGM20);
+  TCCR2B |= (1<<CS20);
+  TCNT2 = 0;
+#endif // UNIT_TEST
+}
+
+void wheelMotorPWMInit() {
+#ifndef UNIT_TEST
+
+
+  MC_MOTOR0_PWM_OCR = 0;
+  MC_MOTOR1_PWM_OCR = 0;
+
+#ifdef MC_ROBOT0
+  TCNT1 = 0;
+
+  //COMxxx sets set OCR on match when upcounting, clear when downcounting
+  //WGMxx sets phase-correct, frequency-correct PWM
+  //CSxx sets /1 prescaler
+  TCCR1A = (1<<COM1A1) | (1<<COM1A0) | (1<<COM1B1) | (1<<COM1B0);
+  TCCR1B = (1<<CS10) | (1<<WGM13);
+  TCCR1C = 0;
+
+  ICR1 = m_wheelTop;
+#endif
+
+  TCNT1 = 0;
+
+  //COMxxx sets set OCR on match when upcounting, clear when downcounting
+  //WGMxx sets phase-correct, frequency-correct PWM
+  //CSxx sets /1 prescaler
+  TCCR1A = (1<<COM1A1) /*| (1<<COM1A0) |*/ | (1<<COM1B1) /*| (1<<COM1B0)*/;
+  TCCR1B = (1<<CS10) | (1<<WGM13);
+  TCCR1C = 0;
+
+  ICR1 = m_wheelTop;
+
+  // motor phase pins are outputs
+  MC_MOTOR0_PHASE_DDR |= _BV( MC_MOTOR0_PHASE_PIN );
+  MC_MOTOR1_PHASE_DDR |= _BV( MC_MOTOR1_PHASE_PIN );
+
+  // motor pwm pins are outputs
+  MC_MOTOR0_PWM_DDR |= _BV( MC_MOTOR0_PWM_PIN );
+  MC_MOTOR1_PWM_DDR |= _BV( MC_MOTOR1_PWM_PIN );
+
+#ifdef MC_SLEEP
+  // motor sleep pins are outputs
+  MC_MOTOR0_SLEEP_DDR |= _BV( MC_MOTOR0_SLEEP_PIN );
+  MC_MOTOR1_SLEEP_DDR |= _BV( MC_MOTOR1_SLEEP_PIN );
+
+  // motor sleep pins are high ( don't sleep )
+  MC_MOTOR0_SLEEP_PORT |= _BV( MC_MOTOR0_SLEEP_PIN );
+  MC_MOTOR1_SLEEP_PORT |= _BV( MC_MOTOR1_SLEEP_PIN );
+#endif
+
+#endif // UNIT_TEST
+}
+
+void limitSwitchInit() {
+#ifndef UNIT_TEST
+  // Set limit switches to be inputs
+  TILT_LIMIT_DDR &= ~_BV( TILT_LIMIT_PIN );
+
+  // Turn the pull-up resistors on
+  TILT_LIMIT_PORT |= _BV( TILT_LIMIT_PIN );
+#endif
+}
+
+void pinChangeInterruptInit() {
+#ifndef UNIT_TEST
+  // make pins inputs
+  DDRA &= ~_BV( MC_ROT0_PIN );
+  DDRA &= ~_BV( MC_ROT1_PIN );
+  DDRA &= ~_BV( MC_BUTTON0_PIN );
+  DDRA &= ~_BV( MC_BUTTON1_PIN );
+
+  // turn on pull-up resistors
+  PORTA |= _BV( MC_ROT0_PIN );
+  PORTA |= _BV( MC_ROT1_PIN );
+  PORTA |= _BV( MC_BUTTON0_PIN );
+  PORTA |= _BV( MC_BUTTON1_PIN );
+
+  PCMSK0 |= _BV(PCINT4) | _BV(PCINT5) | _BV(PCINT6) | _BV(PCINT7);
+  PCICR |= _BV( PCIE0 );
+  m_oldPinA = PINA;
+#endif
+}
+
+void timerInit() {
+  timerInterruptEnable();
+}
+
+void homeFunction() {
+  m_tiltHomingState = HOMING_NOT_STARTED;
+}
+
+void bootFunction() {
+  encoderOff();
+
+  timerInterruptDisable();
+
+  //wait 100 milliseconds for any remaining characters to be sent or received
+  delayMS( 100 );
+#ifndef UNIT_TEST
+
+  MCUCR = _BV(IVCE);
+  MCUCR = _BV(IVSEL);               //move interrupt vectors to the boot sector sector
+  asm volatile("jmp 0xF800");
+#endif // UNIT_TEST
+
+}
+
+void helpFunction() {
+  print_P( HELP_MSG );
+}
+
+bool getSetTimer( volatile u16* p_timer, u16 p_resetValue );
+
+void chargerFunction() {
+  bool oldA2DEnable = m_a2dEnable;
+  m_a2dEnable = false;
+
+  while ( true ) {
+    if (uartIsCharAvailable()) {
+      u08 c = uartBlockingGetChar();
+      if ( c == '.' ) {
+	break;
+      } else if ( c == 'C' ) {
+	spiClearErrors();
+      } else if ( c == 'E' ) {
+	uartPutString( "Errors: " );
+	uartPrintInt( spiGetErrors() );
+	uartPutString( "\r\n" );
+      } else {
+	// this version of put waits
+	spiPutChar( c );
+      }
+    }
+
+    if (spiIsCharAvailable() ) {
+      u08 received = spiGetChar();
+
+      uartPutChar( received );
+      if ( received == '\r' ) {
+	uartPutChar( '\n' );
+      }
+    }
+
+    doImportantStuff();
+  }
+  printNewLine();
+  m_a2dEnable = oldA2DEnable;
+}
+
+void latencyFunction() {
+#ifndef UNIT_TEST
+  bool oldA2DEnable = m_a2dEnable;
+  m_a2dEnable = false;
+
+  stopFunction();
+  while ( true ) {
+    u08 c = uartBlockingGetChar();
+    if ( c == 'q' ) {
+      break;
+    } else if ( c == 'a' ) {
+      uartPutChar( 'b' );
+    } else if ( c == 'c' ) {
+      uartPutString( "dddddddddddddddde" );
+    }
+  }
+  unstopFunction();
+
+  m_a2dEnable = oldA2DEnable;
+#endif // UNIT_TEST
+}
+
+bool getSetTimer( volatile u16* p_timer, u16 p_resetValue ) {
+  bool timerExpired = false;
+
+  // simulate timer interrupt during unit test
+#ifdef UNIT_TEST
+  u16* timer = (u16*) p_timer;
+  simulate_timer_interrupt(timer); // see simulator_hal.c
+#endif // UNIT_TEST
+
+  timerInterruptDisable();
+  if ( !(*p_timer) ) {
+    *p_timer = p_resetValue;
+    timerExpired = true;
+  }
+  timerInterruptEnable();
+  return timerExpired;
+}
+
+void doInnerLoopIfItsTime() {
+  if ( getSetTimer( &m_innerControlTimer, m_innerControlIntervalTimerTicks ) ) {
+    if ( m_innerLoopEnabled ) {
+      innerSpeedControl();
+    }
+
+    // don't mess with height motor, so we only do motors 0-2
+    for ( int i=0; i < NUM_MOTORS-1; i++ ) {
+      changeMotorSpeedSlowly( i );
+    }
+  }
+}
+
+void doImportantStuff(){
+  if ( m_tiltHomingState == HOMING_NOT_STARTED ) {
+    tiltHomingInitialize();
+  } else if ( m_tiltHomingState == HOMING_STARTED ) {
+    tiltHoming();
+
+    // if the tilt timer has counted down to zero then the tilt hasn't homed in time
+    if ( getTimer( &m_tiltFailedTimer ) == 0 ) {
+      tiltHomingFailed();
+    }
+  }
+
+  doInnerLoopIfItsTime();
+
+  if ( m_outerControlIntervalTimerTicks && getSetTimer( &m_outerControlTimer, m_outerControlIntervalTimerTicks ) ) {
+    outerSpeedControl();
+  }
+
+#ifndef UNIT_TEST
+  if ( getSetTimer( &m_ledTimer, m_ledTimerIntervalTimerTicks ) ) {
+    // flip LED
+    MC_LED0_PORT ^= _BV( MC_LED0_PIN );
+  }
+#endif // UNIT_TEST
+
+#ifndef UNIT_TEST
+  /*MOTION HARDWARE FALIURE CODE*/
+ 
+  if ( (MC_MOTOR0_PWM_OCR >= 255) || (MC_MOTOR1_PWM_OCR >= 255) ) {
+    //At least one motor have full pwm, need to check for hardware failure
+    if (!m_reverseSequenceRunning){
+        if (!m_maxPowerDetectedFirstTime) {
+            setTimer( &m_safetyTimer, SAFETY_TIMER_INTERVAL );
+            m_maxPowerDetectedFirstTime = true;
+			
+			//Save current direction since it is this direction that is most likely to have caused the 
+			//power to the motor to reech maximum.
+			//There is always the possibility that the direction just got reversed but that should lower 
+			//the power to the motor in that case before the timer elapses.
+			if ( !(MC_MOTOR0_PHASE_PORT & _BV( MC_MOTOR0_PHASE_PIN )) != MC_MOTOR0_PHASE_REVERSE ) {
+				m_hw_failure_right_wheel_forward = true;
+				//Right wheel goes forward, now check left wheel
+				if ( !(MC_MOTOR1_PHASE_PORT & _BV( MC_MOTOR1_PHASE_PIN )) != MC_MOTOR1_PHASE_REVERSE ) {
+					//Left wheel goes forward
+					m_hw_failure_left_wheel_forward = true;
+				} else {
+					//Left wheel goes backwards
+					m_hw_failure_left_wheel_forward = false;
+				}
+			} else {
+				m_hw_failure_right_wheel_forward = false;
+				//Right wheel goes backwards, now check left wheel
+				if ( (MC_MOTOR1_PHASE_PORT & _BV( MC_MOTOR1_PHASE_PIN )) != MC_MOTOR1_PHASE_REVERSE ) {
+					//Left wheel goes backwards
+					m_hw_failure_left_wheel_forward = false;
+				} else {
+					//Left wheel goes forward
+					m_hw_failure_left_wheel_forward = true;
+				}
+			}
+			
+			//Flush que to prevent a new movement to be loaded.
+			flushQueue();
+        } else if (getTimer( &m_safetyTimer ) == 0) {
+            //Start reverse sequence
+            m_reverseSequenceRunning = true;
+            //Now reverse last direction
+			
+			if ( m_hw_failure_right_wheel_forward ) {
+				//m_hw_failure_right_wheel_forward = true;
+				//Right wheel goes forward, now check left wheel
+				if ( m_hw_failure_left_wheel_forward ) {
+					//Left wheel goes forward
+					//m_hw_failure_left_wheel_forward = true;
+					enQueue(-FAILURE_REVERSE_STRAIGHT_DISTANCE, 666.0f, 0.0f, 0.0f, 0);
+				} else {
+					//Left wheel goes backwards
+					//m_hw_failure_left_wheel_forward = false;
+					enQueue(FAILURE_REVERSE_TURNING_DISTANCE, 0.0f, 0.0f, 0.0f, 0);
+				}
+			} else {
+				//m_hw_failure_right_wheel_forward = false;
+				//Right wheel goes backwards, now check left wheel
+				if ( !m_hw_failure_left_wheel_forward ) {
+					//Left wheel goes backwards
+					//m_hw_failure_left_wheel_forward = false;
+					enQueue(FAILURE_REVERSE_STRAIGHT_DISTANCE, 666.0f, 0.0f, 0.0f, 0);
+				} else {
+					//Left wheel goes forward
+					//m_hw_failure_left_wheel_forward = true;
+					enQueue(-FAILURE_REVERSE_TURNING_DISTANCE, 0.0f, 0.0f, 0.0f, 0);
+				}
+			}
+	  
+            //Zero current movement to make sure that the wheels will start from scratch
+            m_nextMoveDistance = 0;
+            m_currentPosLeft = m_leftPos;
+            m_currentPosRight = m_rightPos;
+    
+            m_currentVelRight = 0.0;
+            m_currentVelLeft = 0.0;
+			
+			getEncoderCountsAndZero(0);
+			getEncoderCountsAndZero(1);
+			
+			//zero movement counters for next move
+			m_totalRightCounts =0;
+			m_currentClothoidRight = 0;
+			m_currentClothoidRightFloat = 0.0;
+			m_totalLeftCounts  =0;
+			m_currentClothoidLeft = 0;
+			m_currentClothoidLeftFloat = 0.0;
+			
+			m_newPositionLoaded = false;
+	
+		}
+    } else {
+        if (!m_maxPowerDetectedSecondTime) {
+            setTimer( &m_safetyTimer, SAFETY_TIMER_INTERVAL );
+            m_maxPowerDetectedSecondTime = true;
+        } else if (getTimer( &m_safetyTimer ) == 0) {
+            //The safety timer have expired and still no decrease of motor power. This is 
+			//a hardware error so stop all movement and go into ESTOP movement state.
+			stopFunction();
+			m_mode = ESTOP;
+        } 
+    }
+  } else if (m_reverseSequenceRunning ) {
+    if ((m_totalLeftCounts!=0) && (m_totalRightCounts!=0) && (m_itemsInQueue==0)) {
+        //We have encoder pulses on both wheels when reverse sequence were running so no error. Reset everything
+        m_reverseSequenceRunning = false; 
+        m_maxPowerDetectedFirstTime = false;
+        m_maxPowerDetectedSecondTime = false;
+		enQueue(0.0f, 0.0f, 0.0f, 0.0f, 0);
+		
+		//Zero current movement to make sure that the wheels will start from scratch
+		m_nextMoveDistance = 0;
+		m_currentPosLeft = m_leftPos;
+		m_currentPosRight = m_rightPos;
+
+		m_currentVelRight = 0.0;
+		m_currentVelLeft = 0.0;
+		
+		getEncoderCountsAndZero(0);
+		getEncoderCountsAndZero(1);
+		
+		//zero movement counters for next move
+		m_totalRightCounts =0;
+		m_currentClothoidRight = 0;
+		m_currentClothoidRightFloat = 0.0;
+		m_totalLeftCounts  =0;
+		m_currentClothoidLeft = 0;
+		m_currentClothoidLeftFloat = 0.0;
+		
+		m_newPositionLoaded = false;
+		
+    }
+  } else if (m_maxPowerDetectedFirstTime && !m_reverseSequenceRunning) {
+    //The reverse sequence have not started and full pwn have stopped. No error so reset everything that is needed.
+    m_maxPowerDetectedFirstTime = false;
+  }
+
+#endif
+
+  if ( m_spiEnabled && getSetTimer( &m_spiClickTimer, SPI_TIMER_TICKS ) ) {
+    spiMasterTick();
+  }
+}
+
+// used for debugging, random purposes, makes it easy to see the status of certain registers or what not
+void tmpFunction() {
+
+#ifndef UNIT_TEST
+
+  encoderOff();
+
+  sprintf( m_buf, "DDRA=%u, PORTA=%u\r\n", DDRA, PORTA );
+  print( m_buf );
+  sprintf( m_buf, "DDRB=%u, PORTB=%u\r\n", DDRB, PORTB );
+  print( m_buf );
+  sprintf( m_buf, "DDRC=%u, PORTC=%u\r\n", DDRC, PORTC );
+  print( m_buf );
+  sprintf( m_buf, "DDRD=%u, PORTD=%u\r\n", DDRD, PORTD );
+  print( m_buf );
+  sprintf( m_buf, "EIMSK=%u\r\n", EIMSK );
+  print( m_buf );
+  sprintf( m_buf, "EICRA=%u\r\n", EICRA );
+  print( m_buf );
+
+  while (true) {
+    if ( uartIsCharAvailable() ) {
+      u08 c = uartBlockingGetChar();
+      if ( c == 'q' ) {
+	break;
+      }
+    }
+
+    sprintf( m_buf, "PIND=%u\r\n", PIND );
+    print( m_buf );
+
+    setTimer( &m_tmpTimer, MICROS_TO_TIMER_TICKS( 100000 ) );
+    do {
+      // wait a second
+    } while ( getTimer( &m_tmpTimer ) );
+  }
+
+#endif // UNIT_TEST
+
+  encoderInit();
+}
+
+
+void debugFunction() {
+#ifndef UNIT_TEST
+  print( "DDRC  = " );uartPrintInt( DDRC ); printNewLine();
+  print( "PORTC = " );uartPrintInt( PORTC );printNewLine();
+  print( "PINC  = " );uartPrintInt( PINC ); printNewLine();
+  print( "PC2   = " );uartPrintInt( PC2 );  printNewLine();
+#endif
+}
+
+void timeloopFunction() {
+  s32 numRuns;
+  
+  //This function tries to do different functions/operations during one second and prints the
+  //number of iterations that it managed to do.
+  
+  //--------------------doImportantStuff()--------------------
+  numRuns = 0;
+  setTimer( &m_tmpTimer, MICROS_TO_TIMER_TICKS( 1000000 ) );
+  do {
+    doImportantStuff();
+    numRuns++;
+  } while ( getTimer( &m_tmpTimer ) );
+  print( "doImportantStuff(): " );uartPrintInt( numRuns );printNewLine();
+
+  //--------------------innerSpeedControl()--------------------
+  numRuns = 0;
+  setTimer( &m_tmpTimer, MICROS_TO_TIMER_TICKS( 1000000 ) );
+  do {
+    innerSpeedControl();
+    numRuns++;
+  } while ( getTimer( &m_tmpTimer ) );
+  print( "innerSpeedControl(): " );uartPrintInt( numRuns );printNewLine();
+  
+  //--------------------wheelPositionControl()--------------------
+  numRuns = 0;
+  setTimer( &m_tmpTimer, MICROS_TO_TIMER_TICKS( 1000000 ) );
+  do {
+    wheelPositionControl();
+    numRuns++;
+  } while ( getTimer( &m_tmpTimer ) );
+  print( "wheelPositionControl(): " );uartPrintInt( numRuns );printNewLine();
+
+  //--------------------servoPositionControl()--------------------
+  numRuns = 0;
+  setTimer( &m_tmpTimer, MICROS_TO_TIMER_TICKS( 1000000 ) );
+  do {
+    servoPositionControl();
+    numRuns++;
+  } while ( getTimer( &m_tmpTimer ) );
+  print( "servoPositionControl(): " );uartPrintInt( numRuns );printNewLine();
+
+  //Used for mathematical operations below
+  float a = 1023.0;
+  float b = 1.0 / 1023;
+  float dummyFloat = 0;
+  s32 dummyInt = 0;
+  long long dummyLongLong = 0;
+
+  //--------------------floating devides--------------------
+  numRuns = 0;
+  setTimer( &m_tmpTimer, MICROS_TO_TIMER_TICKS( 1000000 ) );
+  do {
+    dummyFloat += numRuns / a;
+    numRuns++;
+  } while ( getTimer( &m_tmpTimer ) );
+  if ( dummyFloat ) print( "No dummy!" ); // just in case compiler optimizes dummy away
+  print( "float divides: " );uartPrintInt( numRuns );printNewLine();
+
+  //--------------------floating multiplies--------------------
+  numRuns = 0;
+  setTimer( &m_tmpTimer, MICROS_TO_TIMER_TICKS( 1000000 ) );
+  do {
+    dummyFloat += numRuns * b;
+    numRuns++;
+  } while ( getTimer( &m_tmpTimer ) );
+  if ( dummyFloat ) print( "No dummy!" ); // just in case compiler optimizes dummy away
+  print( "float multiplies: " );uartPrintInt( numRuns );printNewLine();
+  
+  //--------------------(float)int multiplies--------------------
+  numRuns = 0;
+  setTimer( &m_tmpTimer, MICROS_TO_TIMER_TICKS( 1000000 ) );
+  do {
+    dummyFloat += (float) dummyInt++;
+    numRuns++;
+  } while ( getTimer( &m_tmpTimer ) );
+  if ( dummyFloat ) print( "No dummy!" ); // just in case compiler optimizes dummy away
+  print( "(float)int: " );uartPrintInt( numRuns );printNewLine();
+
+  //--------------------(int) floats--------------------
+  numRuns = 0;
+  setTimer( &m_tmpTimer, MICROS_TO_TIMER_TICKS( 1000000 ) );
+  do {
+    dummyInt += (int) dummyFloat++;
+    numRuns++;
+  } while ( getTimer( &m_tmpTimer ) );
+  if ( dummyInt ) print( "No dummy!" ); // just in case compiler optimizes dummy away
+  print( "(int)floats: " );uartPrintInt( numRuns );printNewLine();
+
+  //--------------------int multiplies--------------------
+  numRuns = 0;
+  setTimer( &m_tmpTimer, MICROS_TO_TIMER_TICKS( 1000000 ) );
+  do {
+    dummyInt += numRuns * (numRuns-1);
+    numRuns++;
+  } while ( getTimer( &m_tmpTimer ) );
+  if ( dummyInt ) print( "No dummy!" ); // just in case compiler optimizes dummy away
+  print( "int multiplies: " );uartPrintInt( numRuns );printNewLine();
+
+  //--------------------int divides--------------------
+  numRuns = 0;
+  setTimer( &m_tmpTimer, MICROS_TO_TIMER_TICKS( 1000000 ) );
+  do {
+    dummyInt += dummyInt / ( numRuns+1);
+    numRuns++;
+  } while ( getTimer( &m_tmpTimer ) );
+  if ( dummyInt ) print( "No dummy!" ); // just in case compiler optimizes dummy away
+  print( "int divides: " );uartPrintInt( numRuns );printNewLine();
+
+  //--------------------strcmp_p--------------------
+  numRuns = 0;
+  setTimer( &m_tmpTimer, MICROS_TO_TIMER_TICKS( 1000000 ) );
+  do {
+    dummyInt += strcmp_P( "OK q", CMDLINE_OK);
+    numRuns++;
+  } while ( getTimer( &m_tmpTimer ) );
+  if ( dummyInt ) print( "No dummy!" ); // just in case compiler optimizes dummy away
+  print( "strcmp_p: " );uartPrintInt( numRuns );printNewLine();
+
+  //--------------------strcmp--------------------
+  numRuns = 0;
+  setTimer( &m_tmpTimer, MICROS_TO_TIMER_TICKS( 1000000 ) );
+  do {
+    dummyInt += strcmp( "disq", DIS0_VAR_N );
+    numRuns++;
+  } while ( getTimer( &m_tmpTimer ) );
+  if ( dummyInt ) print( "No dummy!" ); // just in case compiler optimizes dummy away
+  print( "strcmp: " );uartPrintInt( numRuns );printNewLine();
+
+  //--------------------float multiple by -1--------------------
+  numRuns = 0;
+  setTimer( &m_tmpTimer, MICROS_TO_TIMER_TICKS( 1000000 ) );
+  float one;
+  if ( dummyInt == 17 ) {
+    one = -1.0;
+  } else {
+    one = 1.0;
+  }
+  do {
+    dummyFloat = dummyFloat * one;
+    numRuns++;
+  } while ( getTimer( &m_tmpTimer ) );
+  if ( dummyFloat ) print( "No dummy!" ); // just in case compiler optimizes dummy away
+  print( "float multiplies by -1: " );uartPrintInt( numRuns );printNewLine();
+
+  //--------------------float sign negation--------------------
+  numRuns = 0;
+  setTimer( &m_tmpTimer, MICROS_TO_TIMER_TICKS( 1000000 ) );
+  do {
+    dummyFloat = -dummyFloat;
+    numRuns++;
+  } while ( getTimer( &m_tmpTimer ) );
+  if ( dummyFloat ) print( "No dummy!" );  //just in case compiler optimizes dummy away
+  print( "float sign negations: " );uartPrintInt( numRuns );printNewLine();
+
+  //--------------------long long multiplies--------------------
+  numRuns = 0;
+  dummyLongLong = 33332147;
+  setTimer( &m_tmpTimer, MICROS_TO_TIMER_TICKS( 1000000 ) );
+  do {
+    dummyLongLong *= dummyLongLong  ;
+    numRuns++;
+  } while ( getTimer( &m_tmpTimer ) );
+  if ( dummyLongLong ) print( "No dummy!" ); // just in case compiler optimizes dummy away
+  print( "long long multiplies: " );uartPrintInt( numRuns );printNewLine();
+
+  //--------------------long long devides--------------------
+  numRuns = 0;
+  setTimer( &m_tmpTimer, MICROS_TO_TIMER_TICKS( 1000000 ) );
+  do {
+    dummyLongLong /= 3  ;
+    numRuns++;
+  } while ( getTimer( &m_tmpTimer ) );
+  if ( dummyLongLong ) print( "No dummy!" ); // just in case compiler optimizes dummy away
+  print( "long long divides: " );uartPrintInt( numRuns );printNewLine();
+
+  //--------------------dstrof--------------------
+  numRuns = 0;
+  setTimer( &m_tmpTimer, MICROS_TO_TIMER_TICKS( 1000000 ) );
+  dummyFloat = 8.21342;
+  do {
+    dtostrf( dummyFloat, 9, 6, m_buf );
+    numRuns++;
+  } while ( getTimer( &m_tmpTimer ) );
+  print( "dstrof(double to ASCII): " );uartPrintInt( numRuns );printNewLine();
+
+  //--------------------itoa--------------------
+  numRuns = 0;
+  setTimer( &m_tmpTimer, MICROS_TO_TIMER_TICKS( 1000000 ) );
+  dummyInt = 821342;
+  do {
+    ltoa( dummyInt, m_buf, 10 );
+    numRuns++;
+  } while ( getTimer( &m_tmpTimer ) );
+  print( "ltoa(long integer to ASCII): " );uartPrintInt( numRuns );printNewLine();
+}
+
+CmdFuncPtrType getFunctionFromCmd( char *cmd ) {
+  CmdFuncPtrType func=NULL;
+
+  if ( !strcmp( cmd, CMD_GET ) ) {
+    func = getFunction;
+  } else if ( !strcmp( cmd, CMD_SET ) ) {
+    func = setFunction;
+  } else if ( !strcmp( cmd, CMD_STOP ) ) {
+    func = stopFunction;
+  } else if ( !strcmp( cmd, CMD_UNSTOP ) ) {
+    func = unstopFunction;
+  } else if ( !strcmp_P( cmd, CMD_BOOT_P ) ) {
+    func = bootFunction;
+  } else if ( !strcmp_P( cmd, CMD_HOME_P ) ) {
+    func = homeFunction;
+  } else if ( !strcmp_P( cmd, CMD_LATENCY_P ) ) {
+    func = latencyFunction;
+  } else if ( !strcmp_P( cmd, CMD_CHARGER_P ) ) {
+    func = chargerFunction;
+  } else if ( !strcmp_P( cmd, CMD_HELP_P ) ) {
+    func = helpFunction;
+  } else if ( !strcmp_P( cmd, CMD_TIMELOOP_P ) ) {
+    func = timeloopFunction;
+  } else if ( !strcmp_P( cmd, CMD_DEBUG_P ) ) {
+    func = debugFunction;
+  } else if ( !strcmp_P( cmd, CMD_TMP_P ) ) {
+    func = tmpFunction;
+  } else if ( !strcmp_P( cmd, CMD_A2DS_P ) ) {
+    func = a2dsFunction;
+  } else if ( !strcmp_P( cmd, CMD_VARSIZE_P ) ) {
+    func = varSizeFunction;
+  }
+  return func;
+}
+
+void chargerInit() {
+#if !defined(UNIT_TEST)
+  // turn it off
+  MC_TINY_RESET_PORT &=~ _BV(MC_TINY_RESET_PIN);
+
+  // make it an output pin
+  MC_TINY_RESET_DDR |= _BV(MC_TINY_RESET_PIN);
+#endif
+}
+
+void ledInit() {
+#ifndef UNIT_TEST
+  // this LED is initially turned on
+  MC_LED0_PORT |= _BV( MC_LED0_PIN );
+  MC_LED0_DDR |= _BV( MC_LED0_PIN ) ;
+#endif
+}
+
+
+
+void a2dInit() {
+#ifndef UNIT_TEST
+  // REFS0 sets voltage reference to AVcc, Input Channel = ADC0 (default)
+  // Right-adjusted result ( Default ), MUX=0
+  ADMUX = _BV( REFS0 );
+
+  // Free-running mode
+  ADCSRB = 0;
+
+  // ADEN enabled the ADC
+  // ADSC starts a conversion
+  // ADIE enables interrupt on complete
+  // ADPS2..ADPS1 enable slowest ( most accurate ) conversion
+  ADCSRA = _BV( ADEN )  | _BV( ADSC )  | _BV( ADIE ) |
+    _BV( ADPS2 ) | _BV( ADPS1 ) | _BV( ADPS0 );
+
+  //Set PA0 and PA1 to be inputs
+  DDRA &= ~( _BV( PA0 ) | _BV( PA1 ) );
+
+  //Turn of pull-ups for PA0 and PA1
+  PORTA &= ~(_BV( PA0 ) | _BV( PA1 ) );
+#endif // UNIT_TEST
+}
+
+void handleUARTCommand() {
+  putTokenInBuffer( 0, m_buf );
+  CmdFuncPtrType cmd = getFunctionFromCmd( m_buf );
+  if ( cmd == NULL ) {
+    printInvalidName( m_buf );
+  } else {
+    cmd();
+  }
+  print_P( CMDLINE_OK );
+}
+
+void handleSPILine() {
+  // we do a clean copy, to avoid copying control characters like CR that might mess things up on the server
+  char* src = m_spiRcvBuf;
+  char* dst = m_spiLine;
+  do {
+    char c = *src;
+    if ( ( c >= '0' && c <= '9' ) || ( c >= 'a' && c <= 'z' ) || ( c >= 'A' && c <= 'Z' ) || (c==':') || (c==',') || (c==' ') || (c=='#') || (c==0) || (c=='.') || (c=='-') || (c=='_') ) {
+      // Normal character
+      *dst = *src;
+    } else {
+      *dst = '?';
+    }
+    dst++;
+  } while (*src++ != 0);
+  //strcpy( m_spiLine, m_spiRcvBuf );
+}
+
+void handleUARTChar( char p_c ) {
+  if ( p_c == ASCII_CR ) {
+    m_uartCmdBuf[ m_uartCmdBufIndex ] = '\0';
+    m_uartCmdBufIndex = 0;
+    handleUARTCommand();
+  } else {
+    if ( m_uartCmdBufIndex < UART_CMD_BUF_SIZE - 1 ) {
+      m_uartCmdBuf[ m_uartCmdBufIndex++ ] = p_c;
+    }
+  }
+}
+
+void handleSPIChar( char p_c ) {
+  if ( p_c == ASCII_CR ) {
+    m_spiRcvBuf[ m_spiRcvBufIndex ] = '\0';
+    m_spiRcvBufIndex = 0;
+    handleSPILine();
+  } else {
+    if ( m_spiRcvBufIndex < SPI_CMD_BUF_SIZE - 1 ) {
+      m_spiRcvBuf[ m_spiRcvBufIndex++ ] = p_c;
+    }
+  }
+}
+
+void resetAllTimers() {
+#ifndef UNIT_TEST
+  TCCR0A=0;
+  TCCR0B=0;
+  TCCR1A=0;
+  TCCR1B=0;
+  TCCR1C=0;
+  TCCR2A=0;
+  TCCR2B=0;
+#endif // UNIT_TEST
+}
+
+void init_non_autogen_variables() {
+  setF( &m_settings[MAX_SETTINGS - 1], TILT_ANGLE_FROM_HOME_VAR_N, TILT_ANGLE_FROM_HOME_VAR_D, -2.6, 1.22 );
+}
+
+
+int main() {
+  u08 c;
+
+  setOuterControlIntervalMicros( OUTER_CONTROL_INTERVAL_MICROS_DEFAULT );
+  setInnerControlIntervalMicros( INNER_CONTROL_INTERVAL_MICROS_DEFAULT );
+
+  // we make sure all the TCCR registers are zero, that way we can set them independently
+  // just by ORing bits together
+  resetAllTimers();
+
+  chargerInit();
+  wheelMotorPWMInit();
+  heightMotorInit();
+  ledInit();
+  if ( m_spiEnabled ) {
+    spiInitMaster();
+  } else {
+    spiDisableMaster();
+  }
+
+  populateA2D_LUT();
+
+  limitSwitchInit();
+  pinChangeInterruptInit();
+
+  // timer uses the tiltMotorInit for timing, so it must follow stalkMotorPWMInit()
+  // this may not be true anymore
+  timerInit();
+  encoderInit();
+  a2dInit();
+
+  uartInit(
+#ifndef UNIT_TEST
+	   //UART_BAUD_SELECT_DOUBLE_SPEED( 460800, F_CPU )
+	   //UART_BAUD_SELECT( 230400, F_CPU )
+	   UART_BAUD_SELECT( 115200, F_CPU )
+#endif // UNIT_TEST
+	   );
+
+#ifndef UNIT_TEST
+  //uartFlowControlOn( UART_RX_BUFFER_SIZE/2 );
+  uartFlowControlOn( 0 );
+#else
+  fprintf(stderr, "TESTING STANDARD ERROR.\n");
+#endif  // UNIT_TEST
+
+  // give A2Ds used in getServoPosition() a chance to settle
+  // so that getServoPosition() is accurate and the servo doesn't
+  // jerk around
+  //delayMS( 1000 );
+
+  //m_stepwiseServo = getServoPosition();
+  tiltMotorInit();
+
+  // must be before print_P because print_P calls doImportantStuff
+  // which uses m_stepwiseServo
+  settingsInit();
+  
+  //Initiate variables that are different between hardware versions
+  //Same as autogen variables but is not autogenerated since they
+  //are specific to a hardware version
+  init_non_autogen_variables();
+
+  print_P( CONTROLLER_PREFIX );
+  print_P( CONTROLLER_VERSION );
+  print_P( CONTROLLER_USER_ABBREV );
+  print_P( CONTROLLER_COMMA );
+  print_P( CONTROLLER_DATE );
+  print_P( CONTROLLER_CRLF );
+  print_P( CMDLINE_OK );
+
+  while ( true ) {
+    doImportantStuff();
+    if ( uartIsCharAvailable() ) {
+      c = uartBlockingGetChar();
+      handleUARTChar( c );
+    }
+    if ( m_spiEnabled && spiIsCharAvailable() ) {
+      c = spiGetChar();
+      handleSPIChar( c );
+    }
+  }
+}
+
+
+// backupAndRotate - used for when undocking the robot
+void undock(float backupDist) {
+// flush queue, to avoid a possible queue overflow.
+// flushQueue();
+
+// set mode for straight motion
+// move distance is backupDist
+// execute move
+enQueue(backupDist, 666.0f, 0.0f, 0.0f, NEXT_MOVE_BUFFERED);
+
+// then queue rotate 180 degrees
+// set mode to angular motion
+// set velocity for turn
+// wait for previous move to complete
+// execute turn
+enQueue(180.0f, 0.0f, 0.0f, 0.0f, NEXT_MOVE_BUFFERED);
+
+
+}
+
+#ifndef UNIT_TEST
+
+//this executes 36141 times a second
+SIGNAL(SIG_OVERFLOW2) {
+  if ( m_innerControlTimer ) m_innerControlTimer--;
+  if ( m_outerControlTimer ) m_outerControlTimer--;
+  if ( m_tmpTimer ) m_tmpTimer--;
+  if ( m_spiClickTimer ) m_spiClickTimer--;
+
+  // these happen four times slower than the rest, cause otherwise they would overflow u16
+  if ( (m_timerPrescaler++ & 0x7) == 0 ) {
+	 if ( m_safetyTimer ) m_safetyTimer--;
+     if ( m_ledTimer ) m_ledTimer--;
+     if ( m_wheelsGoLimpTimer ) m_wheelsGoLimpTimer--;
+     if ( m_tiltFailedTimer ) m_tiltFailedTimer--;
+     if ( m_button0DebounceTimer ) m_button0DebounceTimer--;
+     if ( m_button1DebounceTimer ) m_button1DebounceTimer--;
+  }
+}
+
+// 0 through 3 are the distance sensors left to right
+// 4 is the servo potentiometer
+// 5 is the battery sensor
+int getChannelFromSensor( int p_num ) {
+  int channel = -1;
+
+  switch ( p_num ) {
+  case 0:
+    channel = 0;
+    break;
+  case 1:
+    channel = 1;
+    break;
+  case 2:
+    channel = 2;
+    break;
+  case 3:
+    channel = 3;
+    break;
+  }
+  return channel;
+}
+
+int getPreviousSensor( int p_num ) {
+  int previousSensor = p_num - 1;
+  if ( previousSensor < 0 ) {
+    previousSensor = A2D_NUM_SENSORS - 1;
+  }
+  return previousSensor;
+}
+
+void inline updateStateRotaryDial( u08 p_old, u08 p_new ) {
+  if ( p_old == 0 ) {
+    if ( p_new == 1 ) {
+      m_rotaryDial--;
+    } else if ( p_new == 2 ) {
+      m_rotaryDial++;
+    }
+  } else if ( p_old == 1 ) {
+    if ( p_new == 3 ) {
+      m_rotaryDial--;
+    } else if ( p_new == 0 ) {
+      m_rotaryDial++;
+    }
+  } else if ( p_old == 3 ) {
+    if ( p_new == 2 ) {
+      m_rotaryDial--;
+    } else if ( p_new == 1 ) {
+      m_rotaryDial++;
+    }
+  } else {
+    // p_old == 2
+    if ( p_new == 0 ) {
+      m_rotaryDial--;
+    } else if ( p_new == 3 ) {
+      m_rotaryDial++;
+    }
+  }
+}
+
+//! Rotary dial interrupt handler, also used for buttons
+SIGNAL(SIG_PIN_CHANGE0) {
+  u08 pinA = PINA;
+
+  bool button0On = (pinA & _BV( MC_BUTTON0_PIN ))==0;
+
+  // if button0 has changed
+  if (button0On != ((m_oldPinA & _BV( MC_BUTTON0_PIN ))==0)) {
+    if (button0On && m_button0DebounceTimer==0) {
+      m_button0++;
+    }
+    m_button0DebounceTimer=100;
+  }
+
+  bool button1On = (pinA & _BV( MC_BUTTON1_PIN ))==0;
+
+  // if button1 has changed
+  if (button1On != ((m_oldPinA & _BV( MC_BUTTON1_PIN ))==0)) {
+    if (button1On && m_button1DebounceTimer==0) {
+      m_button1++;
+    }
+    m_button1DebounceTimer=100;
+  }
+
+  // if one of the rotary dial pins has changed
+  if ( (pinA      & (_BV(MC_ROT0_PIN)|_BV(MC_ROT1_PIN))) !=
+       (m_oldPinA & (_BV(MC_ROT0_PIN)|_BV(MC_ROT1_PIN)))) {
+
+    u08 old = (m_oldPinA >> 6) & 3;
+    u08 new = (pinA >> 6) & 3;
+    updateStateRotaryDial( old, new );
+  }
+
+  m_oldPinA = pinA;
+}
+
+
+SIGNAL(SIG_ADC) {
+  // if A2Ds are disabled ( cause we are printing/getting values ), don't change a thing
+  if ( m_a2dEnable ) {
+    int previousSensor = m_a2dStep;
+
+    m_a2d[previousSensor][ m_a2dRingIndex ] = ADC;
+
+    m_a2dStep++;
+    if ( m_a2dStep >= A2D_NUM_SENSORS ) {
+      m_a2dStep = 0;
+      m_a2dRingIndex++;
+
+      if ( m_a2dRingIndex >= A2D_NUM_SAMPLES ) {
+	m_a2dRingIndex = 0;
+      }
+    }
+
+    int channel = getChannelFromSensor( m_a2dStep );
+
+    // keep high bits the same, change only the channel
+    ADMUX = (ADMUX & ( 128+64+32 )) | channel;
+  }
+
+  // start another conversion
+  ADCSRA |= _BV( ADSC );
+}
+#endif // UNIT_TEST
+
+
+
+

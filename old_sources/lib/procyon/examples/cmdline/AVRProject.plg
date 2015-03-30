@@ -1,0 +1,38 @@
+<html>
+<body>
+<pre>
+<h1>Build Log</h1>
+<h3>
+--------------------Configuration: AVRProject - Win32 Debug--------------------
+</h3>
+
+avr-gcc -c -g  -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=cmdlinetest.lst -mmcu=atmega163 -I. cmdlinetest.c -o cmdlinetest.o
+avr-gcc -c -g  -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/buffer.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/buffer.c -o c:\code\avr\avrlib/buffer.o
+avr-gcc -c -g  -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/uart.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/uart.c -o c:\code\avr\avrlib/uart.o
+avr-gcc -c -g  -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/rprintf.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/rprintf.c -o c:\code\avr\avrlib/rprintf.o
+avr-gcc -c -g  -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/timer.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/timer.c -o c:\code\avr\avrlib/timer.o
+avr-gcc -c -g  -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/a2d.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/a2d.c -o c:\code\avr\avrlib/a2d.o
+avr-gcc -c -g  -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/vt100.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/vt100.c -o c:\code\avr\avrlib/vt100.o
+avr-gcc -c -g  -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/cmdline.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/cmdline.c -o c:\code\avr\avrlib/cmdline.o
+avr-gcc  c:\code\avr\avrlib/buffer.o c:\code\avr\avrlib/uart.o c:\code\avr\avrlib/rprintf.o c:\code\avr\avrlib/timer.o c:\code\avr\avrlib/a2d.o c:\code\avr\avrlib/vt100.o c:\code\avr\avrlib/cmdline.o cmdlinetest.o    -Wl,-Map=cmdlinetest.map,--cref -mmcu=atmega163 -o cmdlinetest.elf
+avr-objcopy --debugging -O coff-ext-avr \
+ --change-section-address   .data-0x800000 \
+ --change-section-address    .bss-0x800000 \
+ --change-section-address .noinit-0x800000 \
+ --change-section-address .eeprom-0x810000 \
+ cmdlinetest.elf cmdlinetest.cof
+avr-objcopy -O ihex  -R .eeprom cmdlinetest.elf cmdlinetest.hex
+avr-objcopy -j .eeprom --set-section-flags=.eeprom="alloc,load" --change-section-lma .eeprom=0 -O ihex  cmdlinetest.elf cmdlinetest.eep
+avr-size cmdlinetest.elf
+   text    data     bss     dec     hex filename
+   8198      40     528    8766    223e cmdlinetest.elf
+Errors: none
+rm c:\code\avr\avrlib/a2d.o c:\code\avr\avrlib/cmdline.o c:\code\avr\avrlib/uart.o c:\code\avr\avrlib/timer.o c:\code\avr\avrlib/rprintf.o c:\code\avr\avrlib/vt100.o c:\code\avr\avrlib/buffer.o
+
+
+
+<h3>Results</h3>
+AVRProject.exe - 0 error(s), 0 warning(s)
+</pre>
+</body>
+</html>

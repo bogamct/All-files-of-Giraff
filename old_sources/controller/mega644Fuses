@@ -1,0 +1,42 @@
+# The beginning of this file is fed into avrdude to set the fuses
+
+write efuse 0 0xfd
+write hfuse 0 0xdc
+write lfuse 0 0xe6
+quit
+
+
+efuse [ value: fd ]
+--
+na: 1
+na: 1
+na: 1
+na: 1
+na: 1
+bodlevel2: 1
+bodlevel1: 0
+bodlevel0: 1
+
+hfuse [ value: dc ]
+--
+ocden     : 1
+jtag      : 1
+spien     : 0
+wdton     : 1
+eesave    : 1
+bootsz1   : 1
+bootsz0   : 0  
+bootrst   : 0 
+
+lfuse [ value: e6 ]
+--
+ckdiv8 : 1
+ckout  : 1
+sut1   : 1 
+sut0   : 0 
+cksel3 : 0 
+cksel2 : 1 
+cksel1 : 1 
+cksel0 : 0 
+
+

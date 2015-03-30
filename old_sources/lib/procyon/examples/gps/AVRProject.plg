@@ -1,0 +1,40 @@
+<html>
+<body>
+<pre>
+<h1>Build Log</h1>
+<h3>
+--------------------Configuration: AVRProject - Win32 Debug--------------------
+</h3>
+
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/buffer.lst -mmcu=atmega128 -I. c:\code\avr\avrlib/buffer.c -o c:\code\avr\avrlib/buffer.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/uart2.lst -mmcu=atmega128 -I. c:\code\avr\avrlib/uart2.c -o c:\code\avr\avrlib/uart2.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/rprintf.lst -mmcu=atmega128 -I. c:\code\avr\avrlib/rprintf.c -o c:\code\avr\avrlib/rprintf.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/timer.lst -mmcu=atmega128 -I. c:\code\avr\avrlib/timer.c -o c:\code\avr\avrlib/timer.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/vt100.lst -mmcu=atmega128 -I. c:\code\avr\avrlib/vt100.c -o c:\code\avr\avrlib/vt100.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/tsip.lst -mmcu=atmega128 -I. c:\code\avr\avrlib/tsip.c -o c:\code\avr\avrlib/tsip.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/nmea.lst -mmcu=atmega128 -I. c:\code\avr\avrlib/nmea.c -o c:\code\avr\avrlib/nmea.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/gps.lst -mmcu=atmega128 -I. c:\code\avr\avrlib/gps.c -o c:\code\avr\avrlib/gps.o
+avr-gcc  c:\code\avr\avrlib/buffer.o c:\code\avr\avrlib/uart2.o c:\code\avr\avrlib/rprintf.o c:\code\avr\avrlib/timer.o c:\code\avr\avrlib/vt100.o c:\code\avr\avrlib/tsip.o c:\code\avr\avrlib/nmea.o c:\code\avr\avrlib/gps.o gpstest.o    -Wl,-Map=gpstest.map,--cref -lm -mmcu=atmega128 -o gpstest.elf
+avr-objcopy --debugging -O coff-ext-avr \
+ --change-section-address   .data-0x800000 \
+ --change-section-address    .bss-0x800000 \
+ --change-section-address .noinit-0x800000 \
+ --change-section-address .eeprom-0x810000 \
+ gpstest.elf gpstest.cof
+Discarding local symbol outside any compilation unit: .__do_copy_data_start
+Discarding local symbol outside any compilation unit: .__do_copy_data_loop
+avr-objcopy -O ihex  -R .eeprom gpstest.elf gpstest.hex
+avr-objcopy -j .eeprom --set-section-flags=.eeprom="alloc,load" --change-section-lma .eeprom=0 -O ihex  gpstest.elf gpstest.eep
+avr-size gpstest.elf
+   text    data     bss     dec     hex filename
+  10572      12     614   11198    2bbe gpstest.elf
+Errors: none
+rm c:\code\avr\avrlib/nmea.o c:\code\avr\avrlib/timer.o c:\code\avr\avrlib/uart2.o c:\code\avr\avrlib/tsip.o c:\code\avr\avrlib/rprintf.o c:\code\avr\avrlib/vt100.o c:\code\avr\avrlib/buffer.o c:\code\avr\avrlib/gps.o
+
+
+
+<h3>Results</h3>
+AVRProject.exe - 0 error(s), 0 warning(s)
+</pre>
+</body>
+</html>

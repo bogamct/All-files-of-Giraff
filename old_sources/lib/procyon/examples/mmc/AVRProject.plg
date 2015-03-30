@@ -1,0 +1,38 @@
+<html>
+<body>
+<pre>
+<h1>Build Log</h1>
+<h3>
+--------------------Configuration: AVRProject - Win32 Debug--------------------
+</h3>
+
+avr-gcc -c -g  -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/buffer.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/buffer.c -o c:\code\avr\avrlib/buffer.o
+avr-gcc -c -g  -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/uart.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/uart.c -o c:\code\avr\avrlib/uart.o
+avr-gcc -c -g  -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/rprintf.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/rprintf.c -o c:\code\avr\avrlib/rprintf.o
+avr-gcc -c -g  -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/timer.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/timer.c -o c:\code\avr\avrlib/timer.o
+avr-gcc -c -g  -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/vt100.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/vt100.c -o c:\code\avr\avrlib/vt100.o
+avr-gcc -c -g  -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/spi.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/spi.c -o c:\code\avr\avrlib/spi.o
+avr-gcc -c -g  -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/mmc.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/mmc.c -o c:\code\avr\avrlib/mmc.o
+avr-gcc -c -g  -Os -Wall -Wstrict-prototypes -Ic:\code\avr\avrlib -Wa,-ahlms=c:\code\avr\avrlib/debug.lst -mmcu=atmega163 -I. c:\code\avr\avrlib/debug.c -o c:\code\avr\avrlib/debug.o
+avr-gcc  mmctest.o c:\code\avr\avrlib/buffer.o c:\code\avr\avrlib/uart.o c:\code\avr\avrlib/rprintf.o c:\code\avr\avrlib/timer.o c:\code\avr\avrlib/vt100.o c:\code\avr\avrlib/spi.o c:\code\avr\avrlib/mmc.o c:\code\avr\avrlib/debug.o   -Wl,-Map=mmctest.map,--cref -mmcu=atmega163 -o mmctest.elf
+avr-objcopy --debugging -O coff-ext-avr \
+ --change-section-address   .data-0x800000 \
+ --change-section-address    .bss-0x800000 \
+ --change-section-address .noinit-0x800000 \
+ --change-section-address .eeprom-0x810000 \
+ mmctest.elf mmctest.cof
+avr-objcopy -O ihex -R .eeprom mmctest.elf mmctest.hex
+avr-objcopy -j .eeprom --set-section-flags=.eeprom="alloc,load" --change-section-lma .eeprom=0 -O ihex mmctest.elf mmctest.eep
+avr-size mmctest.elf
+   text    data     bss     dec     hex filename
+   6360       0     179    6539    198b mmctest.elf
+Errors: none
+rm c:\code\avr\avrlib/uart.o c:\code\avr\avrlib/timer.o c:\code\avr\avrlib/debug.o c:\code\avr\avrlib/spi.o c:\code\avr\avrlib/rprintf.o c:\code\avr\avrlib/mmc.o c:\code\avr\avrlib/vt100.o c:\code\avr\avrlib/buffer.o
+
+
+
+<h3>Results</h3>
+AVRProject.exe - 0 error(s), 0 warning(s)
+</pre>
+</body>
+</html>

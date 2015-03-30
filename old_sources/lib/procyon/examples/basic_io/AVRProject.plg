@@ -1,0 +1,24 @@
+<html>
+<body>
+<pre>
+<h1>Build Log</h1>
+<h3>
+--------------------Configuration: AVRProject - Win32 Debug--------------------
+</h3>
+
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:/code/avr/avrlib -Wa,-ahlms=basiciotest.lst -mmcu=atmega323 -I. basiciotest.c -o basiciotest.o
+avr-gcc  basiciotest.o   -Wl,-Map=basiciotest.map,--cref -mmcu=atmega323 -o basiciotest.elf
+avr-objcopy -O ihex  -R .eeprom basiciotest.elf basiciotest.hex
+avr-objcopy -j .eeprom --set-section-flags=.eeprom="alloc,load" --change-section-lma .eeprom=0 -O ihex  basiciotest.elf basiciotest.eep
+avr-size basiciotest.elf
+   text    data     bss     dec     hex filename
+    184       0       0     184      b8 basiciotest.elf
+Errors: none
+
+
+
+<h3>Results</h3>
+AVRProject.exe - 0 error(s), 0 warning(s)
+</pre>
+</body>
+</html>

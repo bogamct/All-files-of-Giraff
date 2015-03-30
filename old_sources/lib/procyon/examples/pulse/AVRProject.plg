@@ -1,0 +1,33 @@
+<html>
+<body>
+<pre>
+<h1>Build Log</h1>
+<h3>
+--------------------Configuration: AVRProject - Win32 Debug--------------------
+</h3>
+
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:/code/avr/avrlib -Wa,-ahlms=c:/code/avr/avrlib/buffer.lst -mmcu=atmega323 -I. c:/code/avr/avrlib/buffer.c -o c:/code/avr/avrlib/buffer.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:/code/avr/avrlib -Wa,-ahlms=c:/code/avr/avrlib/uart.lst -mmcu=atmega323 -I. c:/code/avr/avrlib/uart.c -o c:/code/avr/avrlib/uart.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:/code/avr/avrlib -Wa,-ahlms=c:/code/avr/avrlib/rprintf.lst -mmcu=atmega323 -I. c:/code/avr/avrlib/rprintf.c -o c:/code/avr/avrlib/rprintf.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:/code/avr/avrlib -Wa,-ahlms=c:/code/avr/avrlib/timer.lst -mmcu=atmega323 -I. c:/code/avr/avrlib/timer.c -o c:/code/avr/avrlib/timer.o
+avr-gcc -c -g -Os -Wall -Wstrict-prototypes -Ic:/code/avr/avrlib -Wa,-ahlms=c:/code/avr/avrlib/pulse.lst -mmcu=atmega323 -I. c:/code/avr/avrlib/pulse.c -o c:/code/avr/avrlib/pulse.o
+c:/code/avr/avrlib/pulse.c: In function `pulseT1AService':
+c:/code/avr/avrlib/pulse.c:197: warning: unused variable `OCValue'
+c:/code/avr/avrlib/pulse.c: In function `pulseT1BService':
+c:/code/avr/avrlib/pulse.c:234: warning: unused variable `OCValue'
+avr-gcc  c:/code/avr/avrlib/buffer.o c:/code/avr/avrlib/uart.o c:/code/avr/avrlib/rprintf.o c:/code/avr/avrlib/timer.o c:/code/avr/avrlib/pulse.o pulsetest.o   -Wl,-Map=pulsetest.map,--cref -mmcu=atmega323 -o pulsetest.elf
+avr-objcopy -O ihex  -R .eeprom pulsetest.elf pulsetest.hex
+avr-objcopy -j .eeprom --set-section-flags=.eeprom="alloc,load" --change-section-lma .eeprom=0 -O ihex  pulsetest.elf pulsetest.eep
+avr-size pulsetest.elf
+   text    data     bss     dec     hex filename
+   9966       0     202   10168    27b8 pulsetest.elf
+Errors: none
+rm c:/code/avr/avrlib/rprintf.o c:/code/avr/avrlib/uart.o c:/code/avr/avrlib/timer.o c:/code/avr/avrlib/buffer.o c:/code/avr/avrlib/pulse.o
+
+
+
+<h3>Results</h3>
+AVRProject.exe - 0 error(s), 2 warning(s)
+</pre>
+</body>
+</html>
