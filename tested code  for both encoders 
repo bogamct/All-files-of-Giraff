@@ -1,0 +1,58 @@
+
+
+#define encoder0PinA  2
+#define encoder0PinB  4
+#define encoder1PinA  3
+#define encoder1PinB  5
+
+volatile int encoder0Pos = 0;
+volatile int encoder1Pos = 0;
+
+void setup() { 
+
+
+  pinMode(encoder0PinA, INPUT);
+  pinMode(encoder1PinA, INPUT); 
+  // digitalWrite(encoder0PinA, HIGH);       // turn on pullup r
+  pinMode(encoder0PinB, INPUT);
+ pinMode(encoder1PinB, INPUT); 
+  // digitalWrite(encoder0PinB, HIGH);       // turn on pullup resistor
+
+  attachInterrupt(0, doEncoder0, CHANGE);  // encoder pin on interrupt 0 - pin 2
+  attachInterrupt(1, doEncoder1, CHANGE);
+  Serial.begin (9600);
+  Serial.println("start");                // a personal quirk
+
+} 
+
+void loop(){
+  Serial.print("left motor: ");
+  Serial.println (encoder0Pos, DEC);
+  Serial.print("right motor: ");
+  Serial.println (encoder1Pos, DEC);
+  }
+
+void doEncoder0() {
+  /* If pinA and pinB are both high or both low, it is spinning
+   * forward. If they're different, it  spinning back ward */
+  if (digitalRead(encoder0PinA) == digitalRead(encoder0PinB)) {
+    encoder0Pos++;
+  }
+  else 
+  {
+    encoder0Pos--;
+  }
+
+  }
+  void doEncoder1() {
+  /* If pinA and pinB are both high or both low, it is spinning
+   * forward. If they're different, it  spinning back ward */
+  if (digitalRead(encoder1PinA) == digitalRead(encoder1PinB)) {
+    encoder1Pos++;
+  }
+  else 
+  {
+    encoder1Pos--;
+  }
+
+  }
