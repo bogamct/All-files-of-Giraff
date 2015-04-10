@@ -1,0 +1,40 @@
+#define SMOOTHSTEP(x) ((x) * (x) * (3 - 2 * (x))) //SMOOTHSTEP expression.
+unsigned long time;
+
+int j = 0;             //Just an Iterator.
+int i = 0;             //Just another Iterator.
+float A = 0.0;         //Input Min Value
+float B = 255.0;       //Input Max Value
+float N = 100;       //Input number of steps for transition
+float X;               //final smoothstepped value
+float v;               //smoothstep expression variable
+
+void setup() {
+  pinMode(6,OUTPUT);
+Serial.begin(9600);  //establish serial connection for debugging
+}
+
+void loop()
+{
+    time = millis();
+  if (j < N)                      // Keep looping until we hit the pre-defined max number
+                                  // of steps
+  {
+    v = j / N;                    // Iteration divided by the number of steps.
+    v = SMOOTHSTEP(v);            // Run the smoothstep expression on v.
+    X = (B * v) + (A * (1 - v));  // Run the linear interpolation expression using the current
+                                  //smoothstep result.
+   
+    Serial.println(X);            // prints the soothstepped value
+    analogWrite(6,X);
+    if(j==N-1)
+    {
+      Serial.print("Time: ");
+
+  //prints time since program started
+  Serial.println(time);
+    }
+    delay(500);
+    j++;                          // Increments j by 1.
+  }
+}
