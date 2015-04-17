@@ -1,0 +1,21 @@
+int led=13;
+void setup(){
+  
+  pinMode(led,OUTPUT);
+}
+void loop(){
+  byte i=0xFC,j=0x55;
+  sendSignal(j);
+  sendSignal(i);
+}
+void sendSignal(byte x){
+  for(byte k=0;k<=7;k++){
+    if((x&B10000000)==B10000000){
+      digitalWrite(led,HIGH);
+    } else {
+      digitalWrite(led,LOW);
+    }
+    delay(1000);
+    x=x<<1;
+  }
+}
