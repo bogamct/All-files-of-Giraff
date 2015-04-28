@@ -1,0 +1,69 @@
+//#define encoder0PinA  11  //CT_enc1 //INT1
+//#define encoder0PinB  23  //DIR_enc1
+//#define encoder1PinA  10  //CT_enc2 //INT0
+//#define encoder1PinB  16  //DIE_enc2 
+
+/**
+ * If SEND_DELTA defined, the module send only delta values of each encoder between measurements.
+ * Otherwize, it sends the absolute encoder value from the beginning of the program.
+ */
+//#define SEND_DELTA;
+
+//#ifdef SEND_DELTA
+//volatile int encoderLPos = 0;
+//volatile int encoderRPos = 0;
+//#else
+volatile long encoderLPos = 0;
+volatile long encoderRPos = 0;
+//#endif
+
+void setup() { 
+  pinMode(11, INPUT); //CT_ENC_1 //INT1
+  pinMode(23, INPUT); //DIR_ENC_1
+  // digitalWrite(encoder0PinA, HIGH);       // turn on pullup r
+  pinMode(10, INPUT); //CT_ENC_2 //INT0
+  pinMode(16, INPUT); //DIR_ENC_2  
+  // digitalWrite(encoder0PinB, HIGH);       // turn on pullup resistor
+  attachInterrupt(0, doLEncoder, RISING);  // encoder pin on interrupt 0 - pin 2
+  attachInterrupt(1, doREncoder, RISING);
+  
+  Serial.begin (115200);
+//  Serial.println("start");                // a personal quirk
+
+} 
+
+void loop(){
+  encoderStatus();
+  delay(200);
+}
+  
+void encoderStatus(){
+  Serial.print (encoderLPos, DEC);
+  Serial.print(" ");
+  Serial.println (encoderRPos, DEC);
+  
+  #ifdef SEND_DELTA
+  encoderLPos = 0;
+  encoderRPos = 0;
+  #endif
+}
+
+void doLEncoder() {
+  /* If pinA and pinB are both high or both low, it is spinning
+   * forward. If they're different, it  spinning back ward */
+  if (digitalRead(16)) {
+    encoderLPos++;
+  } else {
+    encoderLPos--;
+  }
+}
+
+void doREncoder() {
+  /* If pinA and pinB are both high or both low, it is spinning
+   * forward. If they're different, it  spinning back ward */
+  if (digitalRead(23)) {
+    encoderRPos--;
+  } else {
+    encoderRPos++;
+  }
+}
