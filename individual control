@@ -1,0 +1,197 @@
+
+#define SMOOTHSTEP(x) ((x) * (x) * (3 - 2 * (x))) //SMOOTHSTEP expr
+unsigned long int time;
+int var1=0;
+int var2=0;
+int j ;             //Just an Iterator.
+int i ;             //Just another Iterator.
+int z;
+float A;         //Input Min Value
+float B;       //Input Max Value
+float N;       //Input number of steps for transition
+int X1=0;               //final smoothstepped value
+int X2=0;
+int Y=0;
+float v=0;   //smoothstep expression variable
+float y=0;
+void forwards();
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(12,OUTPUT);
+  pinMode(4,OUTPUT);
+  pinMode(14,OUTPUT);
+  pinMode(22,OUTPUT);
+}
+
+String command;
+
+void loop() {
+  
+  i=0;
+    j=0;
+    A=0;
+    B=100;
+    N=12;
+   X1=0;
+  v=0;
+ y=0; 
+  if (Serial.available()) {
+    char c = Serial.read();
+
+    if (c == '\n') {
+      parseCommand(command);
+      command = "";
+    }
+    else {
+      command += c;
+    }
+
+  }
+
+}
+
+void parseCommand(String com) {
+ 
+  String part1;
+  String part2;
+ 
+  //PINON 13
+
+  part1 = com.substring(0, com.indexOf("/"));
+
+  part2 = com.substring(com.indexOf("/") + 1);
+  
+  
+ // Serial.print(part1);
+ int lw=part1.toInt();
+ int rw = part2.toInt();
+ Serial.println(lw);
+ Serial.println(rw);
+  if (lw>0 && rw>0) 
+  {
+   forwards(rw,lw);
+  } 
+if (lw<0 && rw<0)
+{
+  rw=rw*(-1);
+  lw=lw*(-1);
+  backwards(rw,lw);
+}
+if(lw<=0 && rw>0)
+{
+  rw=rw*(-1);
+  lw=lw;
+  left(rw,lw);
+  }
+  if(lw==0 && rw<0)
+  {
+    rw=rw*(-1);
+    left(rw,lw);
+  }
+  if(lw<0 && rw==0)
+  {
+    lw=lw*(-1);
+    right(rw,lw);
+  }
+  if(lw>0 && rw<=0)
+  {
+    lw=lw*(-1);
+    rw=rw;
+    right(rw,lw);
+  }
+}
+
+ void forwards(int a, int b)
+    {
+       z=b;
+      //Serial.println(z);
+      //Serial.print("forwrds");
+     B=a; 
+  
+   digitalWrite(4,LOW); // forward direction
+  digitalWrite(22,HIGH);
+   delay(100);
+   voltagefunction();
+    }
+    void backwards(int pin, int a)
+    {
+       z=a;
+      //Serial.println(z);
+ 
+//Serial.print("backwards");
+B=pin; 
+    digitalWrite(4,HIGH); // forward direction
+    digitalWrite(22,LOW);
+    delay(100);
+   voltagefunction();
+    }
+    void left(int pin, int a)
+    {
+       z=a;
+    //  Serial.println("left");
+     B=pin; 
+    digitalWrite(4,LOW); // forward direction
+    digitalWrite(22,LOW);
+    delay(100);
+   voltagefunction();
+    }
+    void right(int pin, int a)
+    {
+       z=a;
+   //   Serial.println("right");
+     B=pin; 
+    digitalWrite(4,HIGH); // forward direction
+    digitalWrite(22,HIGH);
+    delay(100);
+   voltagefunction();
+    }
+    
+    
+    void voltagefunction()
+{
+  time=0;
+  time=millis();
+  
+while (j < N)                      // Keep looping until we hit the pre-defined max number
+   {
+     
+    v = j / N;                    // Iteration divided by the number of steps.
+    v = SMOOTHSTEP(v);            // Run the smoothstep expression on v.
+    X2= (B * v) + (A * (1 - v));  // Run the linear interpolation expression using the current
+    X1= (z * v) + (A * (1 - v));                            //smoothstep result.
+   
+    Serial.print(X1);            // prints the soothstepped value
+    Serial.print("   ");
+    Serial.println(X2);
+    analogWrite(12,X1);
+    analogWrite(14,X2);
+    if(j==N-1)
+    {
+       while(X1>0 || X2 >0)
+      {
+      X1=X1-10;
+      X2=X2-10;
+      if(X1<0)
+      X1=0;
+      if(X2<0)
+      X2=0;
+      if(X1==0 && X2==0)
+      {
+        time=millis()-time;
+      Serial.print("time :");
+      Serial.println(time);
+    
+      }
+      Serial.print(X1);
+      Serial.print("  ");
+      Serial.println(X2);
+analogWrite(12,X1);
+analogWrite(14,X2);
+delay(200);  
+    }
+   }
+    delay(100);
+    j++;                          
+  }
+}
