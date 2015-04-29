@@ -1,0 +1,132 @@
+
+#define SMOOTHSTEP(x) ((x) * (x) * (3 - 2 * (x))) //SMOOTHSTEP expr
+unsigned long int time;
+boolean o1,o2;
+int lw,rw;          ////Input Max Value
+int j ;             //Just an Iterator.       
+float A;         //Input Min Value       
+float N;       //Input number of steps for transition
+int X1=0;               //final smoothstepped value
+int X2=0;
+float v=0;   //smoothstep expression variable
+void setup() {
+  Serial.begin(115200);
+  pinMode(12,OUTPUT);
+  pinMode(4,OUTPUT);
+  pinMode(14,OUTPUT);
+  pinMode(22,OUTPUT);
+}
+
+String command;
+
+void loop() {
+  j=0;   //iterators
+  A=0;  // Min value
+  N=12; //number of divisions
+  X1=0; // analog values to left motors
+  X2=0; // analog value to right motor
+  v=0;
+  if (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n') {
+      parseCommand(command);
+      command = "";
+    }
+    else{
+      command += c;
+    }
+  }
+}
+
+void parseCommand(String com) {
+  String part1;
+  String part2;
+  part1 = com.substring(0, com.indexOf("/"));
+
+  part2 = com.substring(com.indexOf("/") + 1);
+  lw=part1.toInt();   
+  rw = part2.toInt(); 
+ Serial.println(lw);
+ Serial.println(rw);
+  if (lw>0 && rw>0){   // STRAIGHT
+o1=LOW;
+o2=HIGH;
+ } 
+if (lw<0 && rw<0){      //BACK
+  rw=rw*(-1);        
+  lw=lw*(-1);
+o1=HIGH;
+o2=LOW;
+}
+if(lw>0 && rw<0){        //RIGHT
+    rw=rw*(-1);
+o1=LOW;
+o2=LOW;
+  }
+if(lw<0 && rw>0){        //LEFT
+  lw=lw*(-1);
+   o1=HIGH;
+  o2=HIGH;
+ }
+if(lw==0){                  // when lw=0 check for rw
+if(rw>0)
+o2=HIGH;
+if(rw<0){
+  rw=rw*(-1);
+o2=LOW;
+}
+}
+if(rw==0) {    // when rw=0 check for lw 
+    if(lw>0)
+o1=LOW;
+   if(lw<0){
+      lw=lw*(-1);
+o1=HIGH;  
+    }
+}
+  voltagefunction();
+}
+ void voltagefunction(){
+   digitalWrite(4,o1);
+   digitalWrite(22,o2);
+  time=0;
+  time=millis();
+  
+while (j < N){
+     
+    v = j / N;                    // Iteration divided by the number of steps.
+    v = SMOOTHSTEP(v);            // Run the smoothstep expression on v.
+    X2= (rw * v) + (A * (1 - v));  // Run the linear interpolation expression using the current
+    X1= (lw * v) + (A * (1 - v));                            //smoothstep result.
+   
+    Serial.print(X1);            // prints the soothstepped value
+    Serial.print("   ");
+    Serial.println(X2);
+    analogWrite(12,X1);
+    analogWrite(14,X2);
+    if(j==N-1){
+       while(X1>0 || X2 >0)
+      {
+      X1=X1-10;
+      X2=X2-10;
+      if(X1<0)
+      X1=0;
+      if(X2<0)
+      X2=0;
+      if(X1==0 && X2==0){    // while decrement of the analog value
+        time=millis()-time;
+      Serial.print("time :");
+      Serial.println(time);
+    }
+      Serial.print(X1);
+      Serial.print("  ");
+      Serial.println(X2);
+analogWrite(12,X1);
+analogWrite(14,X2);
+delay(200);  
+    }
+   }
+    delay(100);
+    j++;                          
+  }
+}
