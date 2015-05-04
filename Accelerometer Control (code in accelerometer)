@@ -1,0 +1,239 @@
+
+/****************************************************************************
+
+* Copyright (C) 2011 - 2014 Bosch Sensortec GmbH
+
+*
+
+* Accelerometer.ino
+
+* Date: 2014/09/09
+
+* Revision: 3.0 $
+
+*
+
+* Usage:        Example code to stream Accelerometer data
+
+*
+
+****************************************************************************
+
+/***************************************************************************
+
+* License:
+
+*
+
+* Redistribution and use in source and binary forms, with or without
+
+* modification, are permitted provided that the following conditions are met:
+
+*
+
+*   Redistributions of source code must retain the above copyright
+
+*   notice, this list of conditions and the following disclaimer.
+
+*
+
+*   Redistributions in binary form must reproduce the above copyright
+
+*   notice, this list of conditions and the following disclaimer in the
+
+*   documentation and/or other materials provided with the distribution.
+
+*
+
+*   Neither the name of the copyright holder nor the names of the
+
+*   contributors may be used to endorse or promote products derived from
+
+*   this software without specific prior written permission.
+
+*
+
+* THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+
+* ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+
+* WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+
+* DISCLAIMED. IN NO EVENT SHALL COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY
+
+* DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+
+* (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+
+* LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+
+* ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+
+* (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+
+* SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
+
+*
+
+* The information provided is believed to be accurate and reliable.
+
+* The copyright holder assumes no responsibility for the consequences of use
+
+* of such information nor for any infringement of patents or
+
+* other rights of third parties which may result from its use.
+
+* No license is granted by implication or otherwise under any patent or
+
+* patent rights of the copyright holder.
+
+*/
+
+
+
+#include "NAxisMotion.h"        //Contains the bridge code between the API and the Arduino Environment
+
+#include <Wire.h>
+
+float x1,y1;   // position of accelerometer 
+
+int pwmx1,pwmx2; // pwmx1,pwmy1 corresponds to left wheel
+
+int pwmy1,pwmy2;  // pwmx2,pwmy2 corresponds to right wheel
+
+NAxisMotion mySensor;                 //Object that for the sensor
+    
+
+bool updateSensorData = true;         //Flag to update the sensor data. Default is true to perform the first read before the first stream
+
+
+
+void setup() //This code is executed once
+
+{
+
+  //Peripheral Initialization
+
+  Serial.begin(9600);           //Initialize the Serial Port to view information on the Serial Monitor
+
+  I2C.begin();                    //Initialize I2C communication to the let the library communicate with the sensor. 
+
+  //Sensor Initialization
+
+  mySensor.initSensor();          //The I2C Address can be changed here inside this function in the library
+
+  mySensor.setOperationMode(OPERATION_MODE_NDOF);   //Can be configured to other operation modes as desired
+
+  mySensor.setUpdateMode(MANUAL);	//The default is AUTO. Changing to manual requires calling the relevant update functions prior to calling the read functions
+
+  //Setting to MANUAL requires lesser reads to the sensor
+mySensor.updateAccelConfig();
+updateSensorData = true;
+mySensor.readAccelRange();
+mySensor.readAccelBandwidth();
+mySensor.readAccelPowerMode();
+}
+
+
+
+void loop() //This code is looped forever
+
+{
+  int a=0;  
+ 
+  if (updateSensorData)  //Keep the updating of data as a separate task
+
+  {
+
+    mySensor.updateAccel();        //Update the Accelerometer data
+
+    mySensor.updateLinearAccel();  //Update the Linear Acceleration data
+
+
+
+    mySensor.updateGravAccel();    //Update the Gravity Acceleration data
+
+    mySensor.updateCalibStatus();  //Update the Calibration Status
+
+    updateSensorData = false;
+
+  }
+x1=mySensor.readAccelX();     
+y1=mySensor.readAccelY();
+if(x1>4.5 || x1<-4.5 || y1>4.5 || y1<-4.5)
+a=1;
+if(x1>4.5 && x1<9.5){           //STRAIGHT
+  pwmx1=14*x1-63;     /// This function gives PWM output corresponding to the inclination of accelerometer 
+  Serial.print(pwmx1);
+  Serial.print("/");         // protocol should be leftwheel/rightwheel PMW
+  Serial.println(pwmx1);
+  delay(50);
+ a=1;
+}
+if(x1>9.5)           
+{
+  
+   Serial.print(pwmx1);
+  Serial.print("/");
+  Serial.println(pwmx1);
+  delay(50);
+a=1; 
+}
+if(x1<-4.5 && x1>-9.5){         // REVERSE
+  pwmx2=-(10*x1)-45;
+  Serial.print(-pwmx2);
+  Serial.print("/");
+  Serial.println(-pwmx2);
+  delay(50);
+ a=1;
+}
+if(x1<-9.5)
+{
+  Serial.print(-pwmx2);
+  Serial.print("/");
+  Serial.println(-pwmx2);
+  delay(50);
+ a=1;
+}
+if(y1>4.5 && y1<9.5){          //LEFT
+  a=0;
+  pwmy1=14*y1-63;
+  Serial.print(a);
+  Serial.print("/");
+  Serial.println(pwmy1);
+  delay(50);
+  a=1;
+}
+if(y1>9.5)
+{
+   Serial.print(a);
+  Serial.print("/");
+  Serial.println(pwmy1);
+  delay(50);
+  a=1;
+}
+if(y1<-4.5 && y1>-9.5){        //RIGHT
+   a=0;
+  pwmy2=-(14*y1)-63;
+  Serial.print(pwmy2);
+  Serial.print("/");
+  Serial.println(a);
+  delay(50);
+  a=1;
+}
+if(y1<-9.5)
+{Serial.print(pwmy2);
+  Serial.print("/");
+  Serial.println(a);
+  delay(50);
+  a=1;
+}
+if(a==0)                //WHEN IDLE 
+{
+  delay(50);
+  Serial.print(a);
+  Serial.print("/");
+  Serial.println(a);
+}
+updateSensorData = true;
+}
