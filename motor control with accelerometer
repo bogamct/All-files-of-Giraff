@@ -1,0 +1,94 @@
+/* protocol from accelerometer leftwheel/rightwheel  */
+
+String inputString = "";         // a string to hold incoming data
+boolean stringComplete = false;  // whether the string is complete
+
+#define SERIAL_SET_FLAGS
+volatile boolean serialLineReceived = false;
+boolean o1,o2;     // used for making the phase of motor based on directions  
+int lw,rw;          ////Analog values from accelrometer (enable pins of motor)
+int i=0,j=0;        // i stores the previous command of leftwheel from accelerometer 
+                    // j stores the previous command of right wheel from accelerometer
+void setup() {
+  pinMode(12,OUTPUT);  //M_ENABLEX (left motor)  PWM
+  pinMode(4,OUTPUT); //M_PHASEX (left motor)
+  pinMode(14,OUTPUT); //M_ENABLEY(right motor) PWM
+  pinMode(22,OUTPUT);//M_PHASEY (right motor)
+Serial.begin(9600);  //establish serial connection 
+}
+
+String command;
+
+void loop() {
+  if (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n') {           
+      parseCommand(command);
+      command = "";
+    }
+    else{
+      command += c;
+    }
+  }
+}
+
+void parseCommand(String com) {
+  String part1;
+  String part2;                             /// parsing the command from accelerometer 
+  part1 = com.substring(0, com.indexOf("/"));
+
+  part2 = com.substring(com.indexOf("/") + 1);
+  lw=part1.toInt();   
+  rw = part2.toInt(); 
+ /*
+ Checking for the type of command from accelerometer  
+ */
+  if (lw>0 && rw>0){   // STRAIGHT
+o1=LOW;
+o2=HIGH;
+  voltagefunction();
+ } 
+if (lw<0 && rw<0){      //BACK
+  rw=rw*(-1);        
+  lw=lw*(-1);
+o1=HIGH;
+o2=LOW;
+  voltagefunction();
+}
+if(lw==0){                  // when lw=0 check for rw
+if(rw>0)
+o2=HIGH;
+o1=HIGH;
+lw=rw;
+  voltagefunction();
+}
+if(rw==0) {    // when rw=0 check for lw 
+    if(lw>0)
+o1=LOW;
+o2=LOW;
+rw=lw;
+  voltagefunction();
+}
+}
+ void voltagefunction(){
+   
+   /*
+   This loop consider only small variations in accelerometer commands
+  and omits large variations by checking with its previous commands 
+   */
+   if(((lw-i)<30 && (rw-j)<30) && ((lw-i)>-30 && (rw-j)>-30))
+   {
+   digitalWrite(4,o1);
+   digitalWrite(22,o2);
+  analogWrite(12,lw);
+  Serial.print(lw);
+  i=lw;  // i stores the last command of leftwheel from accelerometer 
+  Serial.print(rw);
+  analogWrite(14,rw);
+  j=rw;
+  if(lw==0 && rw==0)
+  delay(10);
+  else
+  delay(50);
+   }
+}
