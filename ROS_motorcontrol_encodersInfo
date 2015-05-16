@@ -1,0 +1,142 @@
+/* protocol from accelerometer leftwheel/rightwheel  */
+
+String inputString = "";         // a string to hold incoming data
+boolean stringComplete = false;  // whether the string is complete
+
+#define SERIAL_SET_FLAGS
+volatile boolean serialLineReceived = false;
+boolean o1,o2;     // used for making the phase of motor based on directions  
+int lw,rw;          ////Analog values from accelrometer (enable pins of motor)
+int lw1,rw1;
+int i=0,j=0;        // i stores the previous command of leftwheel from accelerometer 
+                    // j stores the previous command of right wheel from accelerometer
+
+#include <ros.h>
+#include <std_msgs/Int8.h>
+#include <std_msgs/Int16.h>
+
+ros::NodeHandle x;
+
+std_msgs::Int16 str_msg;
+std_msgs::Int16 str_msg1;
+
+ros::Publisher encoder("enco_left", &str_msg);   // Publishes number of wheel ticks(encoder info) under topics enco_left 
+ros::Publisher encoder1("enco_right", &str_msg1); // and enco_right
+
+void messageCb1( const std_msgs::Int8& obj1){    //call back function of leftWheel
+lw=obj1.data;
+
+}
+void messageCb( const std_msgs::Int8& obj){      // call back function of rightWheel
+rw=obj.data;
+}
+
+
+ros::Subscriber<std_msgs::Int8> sub("rightWheel", &messageCb );   // subscribes info from accelerometer under topics rightWheel
+ros::Subscriber<std_msgs::Int8> sub1("leftWheel", &messageCb1 );   // and leftWheel
+
+void setup() {
+  pinMode(11, INPUT);  //INT1
+  pinMode(23, INPUT); 
+  // digitalWrite(encoder0PinA, HIGH);       // turn on pullup r
+  pinMode(10, INPUT);   //INT0
+ pinMode(16, INPUT);   
+  pinMode(12,OUTPUT);  //M_ENABLEX (left motor)  PWM
+  pinMode(4,OUTPUT); //M_PHASEX (left motor)
+  pinMode(14,OUTPUT); //M_ENABLEY(right motor) PWM
+  pinMode(22,OUTPUT);//M_PHASEY (right motor)
+//Serial.begin(9600);  //establish serial connection 
+x.initNode();
+x.subscribe(sub);       
+x.subscribe(sub1);
+x.advertise(encoder);
+x.advertise(encoder1);
+attachInterrupt(0, doEncoder0, RISING);  // encoder pin on interrupt 0 - pin 2
+attachInterrupt(1, doEncoder1, RISING);
+}
+
+void loop() {
+  perform();
+  encoder.publish( &str_msg );
+  encoder1.publish(&str_msg1);
+  x.spinOnce();
+}
+
+void perform()
+{
+  if (lw>1 && rw>1){   // STRAIGHT
+lw1=lw;
+rw1=rw;
+o1=LOW;
+o2=HIGH;
+  voltagefunction();
+ } 
+if (lw<0 && rw<0){      //BACK
+  rw1=rw*(-1);        
+  lw1=lw*(-1);
+o1=HIGH;
+o2=LOW;
+  voltagefunction();
+}
+if(lw==0 || lw==1){                  // when lw=0 check for rw
+if(rw>1)
+o2=HIGH;
+o1=HIGH;
+lw1=rw;
+rw1=rw;
+  voltagefunction();
+}
+if(rw==0 || rw==1) {    // when rw=0 check for lw 
+    if(lw>1)
+o1=LOW;
+o2=LOW;
+rw1=lw;
+lw1=lw;
+  voltagefunction();
+}
+}
+ void voltagefunction(){
+    if(((lw-i)<30 && (rw-j)<30) && ((lw-i)>-30 && (rw-j)>-30))
+   {
+   /*
+   This loop consider only small variations in accelerometer commands
+  and omits large variations by checking with its previous commands 
+   */
+   digitalWrite(4,o1);
+   digitalWrite(22,o2);
+  analogWrite(12,lw1);
+ // Serial.print(lw);
+  i=lw;  // i stores the last command of leftwheel from accelerometer 
+  //Serial.print(rw);
+  analogWrite(14,rw1);
+  j=rw;
+  if(lw==0 && rw==0)
+  delay(10);
+  else
+  delay(20);
+   }
+}
+void doEncoder0() {
+  /* If pinA and pinB are both high or both low, it is spinning
+   * forward. If they're different, it  spinning back ward */
+  if (digitalRead(16)) {
+    str_msg.data++;
+  }
+  else 
+  {
+   str_msg.data--;
+  }
+
+  }
+   void doEncoder1() {
+  /* If pinA and pinB are both high or both low, it is spinning
+   * forward. If they're different, it  spinning back ward */
+  if (digitalRead(23)) {
+    str_msg1.data--;
+  }
+  else 
+  {
+    str_msg1.data++;
+  }
+
+  }
